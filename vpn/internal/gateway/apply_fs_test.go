@@ -23,7 +23,8 @@ func (r3w2DiskHost) MkdirAll(path string, mode os.FileMode) error {
 	}
 	return os.MkdirAll(path, mode)
 }
-func (r3w2DiskHost) Stat(path string) (os.FileInfo, error) { return os.Stat(path) }
+func (r3w2DiskHost) Stat(path string) (os.FileInfo, error)  { return os.Stat(path) }
+func (r3w2DiskHost) Lstat(path string) (os.FileInfo, error) { return os.Lstat(path) }
 func (r3w2DiskHost) Chmod(path string, mode os.FileMode) error {
 	return os.Chmod(path, mode)
 }

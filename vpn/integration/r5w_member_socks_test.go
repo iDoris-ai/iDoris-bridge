@@ -44,7 +44,8 @@ func (r5wDiskHost) MkdirAll(path string, mode os.FileMode) error {
 	}
 	return os.MkdirAll(path, mode)
 }
-func (r5wDiskHost) Stat(path string) (os.FileInfo, error) { return os.Stat(path) }
+func (r5wDiskHost) Stat(path string) (os.FileInfo, error)  { return os.Stat(path) }
+func (r5wDiskHost) Lstat(path string) (os.FileInfo, error) { return os.Lstat(path) }
 func (r5wDiskHost) Chmod(path string, mode os.FileMode) error {
 	return os.Chmod(path, mode)
 }

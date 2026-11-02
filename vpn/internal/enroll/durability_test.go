@@ -768,3 +768,173 @@ func TestENOSPCDoesNotUnlockRead(t *testing.T) {
 		}
 	}
 }
+
+// TestPythonReplaceLeavesStaleBakThatEmptyReadRestores is the cross-language
+// recovery contract. Revoke writes the removed hash into .bak and the new
+// bytes in place. Python then renames a new inode over the config under the
+// same <config>.lock and does not touch .bak. An empty live file is not the
+// Python rename crash window once that writer fsyncs; it is later truncation
+// or other corruption. readConfigBytes still treats empty as Go's own
+// truncate window and writes the stale backup back, so the revoked hash
+// returns. This test locks that behavior so a durability change cannot claim
+// fsync closed it.
+func TestPythonReplaceLeavesStaleBakThatEmptyReadRestores(t *testing.T) {
+	if _, err := exec.LookPath("python3"); err != nil {
+		t.Skip("python3 is required")
+	}
+	h0 := HashToken("seed-token")
+	h1 := HashToken("second-token")
+	path := writeHashes(t, 0o640, []string{h0, h1})
+	if _, err := Revoke(path, "acme", h0[:8]); err != nil {
+		t.Fatal(err)
+	}
+	bakBefore, err := os.ReadFile(path + ".bak")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(bakBefore, []byte(h0)) {
+		t.Fatal("completed revoke did not leave the hash in bak")
+	}
+	live, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(live, []byte(h0)) {
+		t.Fatal("completed revoke left the hash in the live file")
+	}
+	before := configInode(t, path)
+	lockBefore := configInode(t, path+".lock")
+	bakSt, err := os.Stat(path + ".bak")
+	if err != nil {
+		t.Fatal(err)
+	}
+	liveSt, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	dir := filepath.Dir(path)
+	script := filepath.Join(dir, "replace.py")
+	body := "import sys\n" +
+		"sys.path.insert(0, sys.argv[1])\n" +
+		"from enroll_lock import locked_update\n" +
+		"def mutate(cfg):\n" +
+		"    cfg['control_url'] = 'https://replaced.example'\n" +
+		"    return cfg\n" +
+		"locked_update(sys.argv[2], mutate)\n"
+	if err := os.WriteFile(script, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command("python3", script, enrollDeployDir(t), path)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("python replace: %v\n%s", err, out)
+	}
+
+	if configInode(t, path) == before {
+		t.Fatal("python replace kept Go's inode")
+	}
+	if configInode(t, path+".lock") != lockBefore {
+		t.Fatal("python replaced the lock file Go created")
+	}
+	replaced, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(replaced, []byte(h0)) || !bytes.Contains(replaced, []byte("https://replaced.example")) {
+		t.Fatalf("python publish = %s", replaced)
+	}
+	if _, err := LoadFile(path); err != nil {
+		t.Fatalf("Go cannot read the Python publish: %v\n%s", err, replaced)
+	}
+	bakAfter, err := os.ReadFile(path + ".bak")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(bakAfter, bakBefore) {
+		t.Fatal("python replace rewrote bak")
+	}
+	bakStAfter, err := os.Stat(path + ".bak")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bakStAfter.Mode().Perm() != bakSt.Mode().Perm() {
+		t.Fatalf("bak mode %o, was %o", bakStAfter.Mode().Perm(), bakSt.Mode().Perm())
+	}
+	bakUID, bakGID := fileOwner(t, path+".bak")
+	prevUID, prevGID := ownerOfInfo(t, bakSt)
+	if bakUID != prevUID || bakGID != prevGID {
+		t.Fatalf("bak owner %d:%d, was %d:%d", bakUID, bakGID, prevUID, prevGID)
+	}
+	liveAfter, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if liveAfter.Mode().Perm() != liveSt.Mode().Perm() {
+		t.Fatalf("live mode %o, was %o", liveAfter.Mode().Perm(), liveSt.Mode().Perm())
+	}
+	liveUID, liveGID := fileOwner(t, path)
+	prevLiveUID, prevLiveGID := ownerOfInfo(t, liveSt)
+	if liveUID != prevLiveUID || liveGID != prevLiveGID {
+		t.Fatalf("live owner %d:%d, was %d:%d", liveUID, liveGID, prevLiveUID, prevLiveGID)
+	}
+
+	// External truncation of a publish that already completed. Not the
+	// crash window closed by fsync-before-replace.
+	if err := os.WriteFile(path, nil, liveSt.Mode().Perm()); err != nil {
+		t.Fatal(err)
+	}
+	pythonInode := configInode(t, path)
+	got, err := ReadFileLocked(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, bakBefore) || !bytes.Contains(got, []byte(h0)) {
+		t.Fatal("empty file did not restore the stale bak")
+	}
+	disk, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(disk, bakBefore) {
+		t.Fatal("restore did not write bak back to disk")
+	}
+	if configInode(t, path) != pythonInode {
+		t.Fatal("restore replaced the inode Python published")
+	}
+	if bytes.Contains(disk, []byte(h0)) && bytes.Contains(disk, []byte(h1)) {
+		return
+	}
+	t.Fatal("restored backup lost a hash from the pre-revoke generation")
+}
+
+func enrollDeployDir(t *testing.T) string {
+	t.Helper()
+	_, file, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("runtime.Caller failed")
+	}
+	dir := filepath.Clean(filepath.Join(filepath.Dir(file), "..", "..", "..", "deploy", "vpn"))
+	if _, err := os.Stat(filepath.Join(dir, "enroll_lock.py")); err != nil {
+		t.Fatal(err)
+	}
+	return dir
+}
+
+func fileOwner(t *testing.T, path string) (int, int) {
+	t.Helper()
+	st, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return ownerOfInfo(t, st)
+}
+
+func ownerOfInfo(t *testing.T, st os.FileInfo) (int, int) {
+	t.Helper()
+	sys, ok := st.Sys().(*syscall.Stat_t)
+	if !ok || sys == nil {
+		t.Fatal("no stat")
+	}
+	return int(sys.Uid), int(sys.Gid)
+}

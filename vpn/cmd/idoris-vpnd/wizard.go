@@ -434,6 +434,12 @@ func (d *deps) applyCmd(args []string) error {
 	if d.host.IsRoot() {
 		return d.applyPrivileged(*planPath)
 	}
+	// Stat before ReadFile. A fifo plan would block a noninteractive apply.
+	// There is no prompt here: a plan that fails the binding check is refused,
+	// so automation and the local UI are not left waiting on stdin.
+	if err := requireRegular(d.host, *planPath, "plan file"); err != nil {
+		return err
+	}
 	raw, err := d.host.ReadFile(*planPath)
 	if err != nil {
 		return err
@@ -442,17 +448,27 @@ func (d *deps) applyCmd(args []string) error {
 	if err != nil {
 		return err
 	}
+	// The plan file is not authority. Refuse before opening the token.
+	if err := gateway.CheckPlanReplay(plan, *planPath, d.host, *replace); err != nil {
+		return err
+	}
 	token := ""
 	if plan.TokenFile != "" {
-		if b, err := d.host.ReadFile(plan.TokenFile); err == nil {
-			token = strings.TrimSpace(string(b))
+		if err := requireRegular(d.host, plan.TokenFile, "token file"); err != nil {
+			return err
 		}
+		b, err := d.host.ReadFile(plan.TokenFile)
+		if err != nil {
+			return err
+		}
+		token = strings.TrimSpace(string(b))
 	}
 	if token != "" && bytes.Contains(raw, []byte(token)) {
 		return errors.New("gateway apply: refusing a plan file that contains the enrollment token")
 	}
 	res, err := gateway.Apply(plan, d.host, gateway.ApplyOptions{
 		Token: token, NoService: *noService, PlanPath: *planPath, ReplaceExisting: *replace,
+		Replay: true,
 	})
 	if err != nil {
 		return err
@@ -797,6 +813,19 @@ func (d *deps) confirmAuthority(authority, expect string, yes bool) error {
 	}
 	if !ok {
 		return errors.New("not applied")
+	}
+	return nil
+}
+
+// requireRegular stats path and refuses anything that is not a regular file.
+// Stat does not open a fifo, so this returns instead of blocking.
+func requireRegular(host fileHost, path, what string) error {
+	info, err := host.Stat(path)
+	if err != nil {
+		return fmt.Errorf("gateway apply: %s: %w", what, err)
+	}
+	if !info.Mode().IsRegular() {
+		return fmt.Errorf("gateway apply: %s is not a regular file", what)
 	}
 	return nil
 }

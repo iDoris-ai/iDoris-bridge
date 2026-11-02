@@ -229,6 +229,8 @@ type fakeOS struct {
 	mkdirs    int
 	installs  int
 	installed [][]byte
+	reads     map[string]int
+	stats     map[string]int
 }
 
 func newFakeOS(root bool, goos string) *fakeOS {
@@ -251,10 +253,14 @@ func (m *fakeOS) MkdirAll(string, os.FileMode) error {
 	return nil
 }
 func (m *fakeOS) Stat(path string) (os.FileInfo, error) {
+	if m.stats == nil {
+		m.stats = map[string]int{}
+	}
+	m.stats[path]++
 	if _, ok := m.files[path]; !ok {
 		return nil, os.ErrNotExist
 	}
-	return fakeInfo{name: filepath.Base(path)}, nil
+	return fakeInfo{name: filepath.Base(path), mode: m.modes[path]}, nil
 }
 func (m *fakeOS) Chmod(path string, mode os.FileMode) error {
 	if _, ok := m.files[path]; !ok {
@@ -264,6 +270,10 @@ func (m *fakeOS) Chmod(path string, mode os.FileMode) error {
 	return nil
 }
 func (m *fakeOS) ReadFile(path string) ([]byte, error) {
+	if m.reads == nil {
+		m.reads = map[string]int{}
+	}
+	m.reads[path]++
 	b, ok := m.files[path]
 	if !ok {
 		return nil, os.ErrNotExist
@@ -282,11 +292,14 @@ func (m *fakeOS) InstallService(path string) error {
 	return nil
 }
 
-type fakeInfo struct{ name string }
+type fakeInfo struct {
+	name string
+	mode os.FileMode
+}
 
 func (m fakeInfo) Name() string       { return m.name }
 func (m fakeInfo) Size() int64        { return 0 }
-func (m fakeInfo) Mode() os.FileMode  { return 0 }
+func (m fakeInfo) Mode() os.FileMode  { return m.mode }
 func (m fakeInfo) ModTime() time.Time { return time.Time{} }
 func (m fakeInfo) IsDir() bool        { return false }
 func (m fakeInfo) Sys() any           { return nil }
@@ -699,5 +712,71 @@ func TestR4WExplicitConfigDoesNotNeedHome(t *testing.T) {
 	err := joinCmd([]string{"--yes", "--no-service", "--code-file", codePath}, bare)
 	if err == nil || !strings.Contains(err.Error(), "home directory") {
 		t.Fatalf("default config without home: %v", err)
+	}
+}
+
+// TestGatewayApplyRejectsCraftedAuthorityPlan is the measured plan-file
+// bypass: an existing token, an attacker enroll URL, and a new config path
+// whose canonical plan name is used so the refusal is the missing binding,
+// not a mismatched filename. The token file is not opened and no service is
+// installed. --no-service is omitted on purpose.
+func TestGatewayApplyRejectsCraftedAuthorityPlan(t *testing.T) {
+	const (
+		goodCfg = "/home/acme/.idoris/vpn.json"
+		goodTok = "/home/acme/.idoris/enroll.token"
+		evilCfg = "/home/acme/other/vpn.json"
+	)
+	host := newFakeOS(false, "linux")
+	goodBody := []byte(`{"enroll_url":"https://enroll.good","enroll_token_file":"` + goodTok + `","hostname":"office-gw"}` + "\n")
+	tokenBody := []byte(testToken + "\n")
+	host.files[goodCfg] = append([]byte(nil), goodBody...)
+	host.modes[goodCfg] = 0o600
+	host.files[goodTok] = append([]byte(nil), tokenBody...)
+	host.modes[goodTok] = 0o600
+	planPath := "/home/acme/other/vpn.json.gateway-plan.json"
+	host.files[planPath] = []byte(`{"role":"member","mode":"auto","accept_routes":true,"enroll_url":"https://evil.example","token_file":"` + goodTok + `","config_path":"` + evilCfg + `"}` + "\n")
+	host.modes[planPath] = 0o600
+	d := testDeps(host, "")
+	err := gatewayCmd([]string{"apply", "--plan", planPath}, d)
+	if err == nil || !strings.Contains(err.Error(), "does not exist") {
+		t.Fatalf("%v\n%s", err, d.out())
+	}
+	if _, ok := host.files[evilCfg]; ok {
+		t.Fatal("crafted plan created a config")
+	}
+	if !bytes.Equal(host.files[goodCfg], goodBody) || !bytes.Equal(host.files[goodTok], tokenBody) {
+		t.Fatal("crafted plan changed the existing enrollment")
+	}
+	if host.installs != 0 || host.mkdirs != 0 {
+		t.Fatalf("installs %d mkdirs %d", host.installs, host.mkdirs)
+	}
+	if host.reads[goodTok] != 0 || host.stats[goodTok] != 0 {
+		t.Fatalf("token stat %d read %d", host.stats[goodTok], host.reads[goodTok])
+	}
+	if strings.Contains(d.out()+d.errOut(), testToken) {
+		t.Fatal("error path printed the token")
+	}
+}
+
+func TestGatewayApplyRejectsSpecialPlanFile(t *testing.T) {
+	const (
+		goodTok  = "/home/acme/.idoris/enroll.token"
+		planPath = "/home/acme/.idoris/gateway-plan.json"
+	)
+	host := newFakeOS(false, "linux")
+	host.files[goodTok] = []byte(testToken + "\n")
+	host.modes[goodTok] = 0o600
+	host.files[planPath] = []byte("{\n  \"enroll_url\": \"https://evil.example\",\n  \"token_file\": \"" + goodTok + "\"\n}\n")
+	host.modes[planPath] = os.ModeNamedPipe
+	d := testDeps(host, "")
+	err := gatewayCmd([]string{"apply", "--plan", planPath}, d)
+	if err == nil || !strings.Contains(err.Error(), "not a regular file") {
+		t.Fatalf("%v", err)
+	}
+	if host.reads[planPath] != 0 || host.reads[goodTok] != 0 {
+		t.Fatalf("opened plan %d token %d", host.reads[planPath], host.reads[goodTok])
+	}
+	if host.installs != 0 {
+		t.Fatal("installed a service")
 	}
 }

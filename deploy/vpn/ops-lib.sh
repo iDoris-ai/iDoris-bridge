@@ -1152,6 +1152,38 @@ offhost_cron_line() {
     "AGE_RECIPIENT" "$outdir" "$script"
 }
 
+# bundle.py lives next to this file. Tests source ops-lib with `here` pointed
+# at a scratch deploy dir, so the path cannot follow $here.
+_vpn_bundle_py() {
+  local lib
+  lib="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+  printf '%s/bundle.py' "$lib"
+}
+
+# Stream a sidecar volume to stdout.
+# 0  — tar accepted every listed file, and one of them is tailscaled.state
+# 42 — no regular tailscaled.state (a lookalike name does not count)
+# *  — find, tar, or docker failed. Stdout may already be a partial archive.
+# Find and tar failures must not become 42. Rollback treats 42 as confirmed
+# absence and would delete a live identity.
+_stream_sidecar_files() {
+  local vol="$1"
+  docker run --rm --user 0 --network none -v "${vol}:/data:ro" "$ALPINE_VOLUME_IMAGE" \
+    sh -c 'cd /data || exit 1
+      find . -type f ! -name "*.sock" > /tmp/list || exit 1
+      have=0
+      while IFS= read -r path; do
+        case "$path" in
+          ./tailscaled.state|*/tailscaled.state) have=1 ;;
+        esac
+      done < /tmp/list
+      if [ "$have" -eq 1 ]; then
+        tar -cf - -T /tmp/list || exit 1
+        exit 0
+      fi
+      exit 42'
+}
+
 copy_sidecar_state() {
   local dest="$1" sid vol rc
   sid="$(_compose_ps_id vpn-sidecar)"
@@ -1167,8 +1199,7 @@ copy_sidecar_state() {
   mkdir -p "$(dirname "$dest")"
   chmod 700 "$(dirname "$dest")"
   set +e
-  docker run --rm --user 0 --network none -v "${vol}:/data:ro" "$ALPINE_VOLUME_IMAGE" \
-    sh -c 'cd /data && find . -type f ! -name "*.sock" > /tmp/list && if grep -q "tailscaled.state" /tmp/list; then tar -cf - -T /tmp/list; exit 0; fi; exit 42' > "$dest"
+  _stream_sidecar_files "$vol" > "$dest"
   rc=$?
   set -e
   if [[ "$rc" -eq 42 ]]; then
@@ -1180,6 +1211,10 @@ copy_sidecar_state() {
     rm -f "$dest"
     die "backup: could not read sidecar state"
   fi
+  if ! python3 "$(_vpn_bundle_py)" sidecar-tar "$dest"; then
+    rm -f "$dest"
+    die "backup: sidecar archive has no regular tailscaled.state"
+  fi
   chmod 600 "$dest"
 }
 
@@ -1189,6 +1224,7 @@ extract_sidecar_tar() {
   [[ -n "$sid" ]] || return 1
   vol="$(volume_name_for "$sid" /var/lib/tailscale)"
   [[ -n "$vol" ]] || return 1
+  python3 "$(_vpn_bundle_py)" sidecar-tar "$tarpath" || return 1
   docker run --rm --user 0 --network none -v "${vol}:/data" -i "$ALPINE_VOLUME_IMAGE" \
     tar -xf - -C /data < "$tarpath" || return 1
   chown_volume_to_image "$sid" /var/lib/tailscale || return 1
@@ -1758,6 +1794,12 @@ _restore_sidecar_volume() {
   vol="$(_project_volume_name vpn-sidecar-state 2>/dev/null || true)"
   if [[ -s "$dest/sidecar-state.tar" ]]; then
     [[ -n "$vol" ]] || return 1
+    # Validate before deleting. A partial or identity-less snapshot used to
+    # wipe tailscaled.state and only then fail the checksum.
+    if ! python3 "$(_vpn_bundle_py)" sidecar-tar "$dest/sidecar-state.tar"; then
+      echo "restore: refusing to replace sidecar identity from an invalid snapshot" >&2
+      return 1
+    fi
     docker run --rm -i --user 0 --network none -v "${vol}:/data" "$ALPINE_VOLUME_IMAGE" \
       sh -c 'find /data -type f ! -name "*.sock" -exec rm -f {} + || true; tar -C /data -xf -' \
       < "$dest/sidecar-state.tar" || return 1
@@ -1773,7 +1815,11 @@ tar_path, dest = sys.argv[1:]
 with tarfile.open(tar_path, "r:*") as tf:
     wanted = None
     for member in tf.getmembers():
-        name = member.name.replace("\\", "/").lstrip("./")
+        name = member.name.replace("\\", "/")
+        # Same one-prefix rule as bundle._is_tailscaled_state. lstrip("./")
+        # would treat ".tailscaled.state" as the identity.
+        if name.startswith("./"):
+            name = name[2:]
         if name == "tailscaled.state" or name.endswith("/tailscaled.state"):
             if member.isfile():
                 wanted = member
@@ -1872,9 +1918,10 @@ _restored_enroll_check() {
 
 # Snapshot vpn-sidecar-state from the named volume. The vpn-sidecar container
 # is not required: down removes it and leaves the volume. sidecar-state.tar
-# means the identity was captured. sidecar-absent means the volume or
-# tailscaled.state was verified missing. A read failure writes neither and
-# returns 1, so a later rollback cannot treat "not captured" as absence.
+# means a regular tailscaled.state was captured and tar accepted the whole
+# file list. sidecar-absent means the volume or tailscaled.state was verified
+# missing. A read or tar failure writes neither and returns 1, so a later
+# rollback cannot treat "not captured" as absence.
 _snapshot_sidecar_state() {
   local dest="$1" sid rc
   rm -f "$dest/sidecar-state.tar" "$dest/sidecar-absent"
@@ -1885,9 +1932,7 @@ _snapshot_sidecar_state() {
     return 0
   fi
   set +e
-  docker run --rm --network none -v "${sid}:/data:ro" "$ALPINE_VOLUME_IMAGE" \
-    sh -c 'cd /data && find . -type f ! -name "*.sock" > /tmp/list && if grep -q "tailscaled.state" /tmp/list; then tar -cf - -T /tmp/list; exit 0; fi; exit 42' \
-    > "$dest/sidecar-state.tar"
+  _stream_sidecar_files "$sid" > "$dest/sidecar-state.tar"
   rc=$?
   set -e
   if [[ "$rc" -eq 42 ]]; then
@@ -1899,6 +1944,11 @@ _snapshot_sidecar_state() {
   if [[ "$rc" -ne 0 || ! -s "$dest/sidecar-state.tar" ]]; then
     rm -f "$dest/sidecar-state.tar" "$dest/sidecar-absent"
     echo "restore: could not snapshot sidecar state" >&2
+    return 1
+  fi
+  if ! python3 "$(_vpn_bundle_py)" sidecar-tar "$dest/sidecar-state.tar"; then
+    rm -f "$dest/sidecar-state.tar" "$dest/sidecar-absent"
+    echo "restore: sidecar snapshot has no regular tailscaled.state" >&2
     return 1
   fi
   chmod 600 "$dest/sidecar-state.tar" || return 1

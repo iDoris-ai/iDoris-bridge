@@ -21,6 +21,10 @@ func TestPS1SharedProvisionTargetIsNotChanged(t *testing.T) {
 		{name: "srv state file parent", cfg: `{"state_file":"/srv/state.json"}`, rel: "srv"},
 		{name: "home directory", cfg: `{"state_dir":"/home/alice"}`, rel: "home/alice"},
 		{name: "var lib itself", cfg: `{"state_dir":"/var/lib"}`, rel: "var/lib"},
+		{name: "run shm socket", cfg: `{"listen":"unix:/run/shm/x.sock"}`, rel: "run/shm"},
+		// /var/run/shm collapses to /run/shm. That is the directory chmod would touch.
+		{name: "var run shm socket", cfg: `{"listen":"unix:/var/run/shm/x.sock"}`, rel: "run/shm"},
+		{name: "usr lib64", cfg: `{"state_dir":"/usr/lib64"}`, rel: "usr/lib64"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

@@ -306,8 +306,8 @@ func isSharedProvisionTarget(p string) bool {
 		"/bin", "/boot", "/dev", "/etc", "/home", "/lib", "/lib64",
 		"/media", "/mnt", "/opt", "/proc", "/root", "/run", "/sbin",
 		"/srv", "/sys", "/tmp", "/usr", "/var",
-		"/dev/shm", "/run/lock", "/run/user",
-		"/usr/bin", "/usr/lib", "/usr/local", "/usr/sbin",
+		"/dev/shm", "/run/shm", "/var/run/shm", "/run/lock", "/run/user",
+		"/usr/bin", "/usr/lib", "/usr/lib64", "/usr/local", "/usr/sbin",
 		"/var/cache", "/var/lib", "/var/lock", "/var/log", "/var/run",
 		"/var/spool", "/var/tmp",
 		"/var/run/user":
@@ -323,7 +323,7 @@ func isSharedProvisionTarget(p string) bool {
 }
 
 func isUnderWorldWritableShared(p string) bool {
-	for _, prefix := range []string{"/tmp/", "/var/tmp/", "/dev/shm/", "/run/lock/", "/var/lock/"} {
+	for _, prefix := range []string{"/tmp/", "/var/tmp/", "/dev/shm/", "/run/shm/", "/run/lock/", "/var/lock/"} {
 		if strings.HasPrefix(p, prefix) {
 			return true
 		}

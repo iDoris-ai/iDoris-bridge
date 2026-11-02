@@ -3,10 +3,12 @@
 
 from __future__ import annotations
 
+import io
 import json
 import os
 import subprocess
 import sys
+import tarfile
 import tempfile
 import unittest
 from pathlib import Path
@@ -123,6 +125,78 @@ class DotenvTest(unittest.TestCase):
         info = json.loads(got.stdout)
         self.assertEqual(info["HEADPLANE_BIND"], "127.0.0.1")
         self.assertEqual(info["HEADPLANE_ACCESS"], "tunnel")
+
+
+def write_tar(path: Path, members: list[tuple[str, bytes | None]]) -> None:
+    with tarfile.open(path, "w") as handle:
+        for name, data in members:
+            info = tarfile.TarInfo(name)
+            if data is None:
+                info.type = tarfile.DIRTYPE
+                info.size = 0
+                handle.addfile(info)
+            else:
+                info.size = len(data)
+                handle.addfile(info, io.BytesIO(data))
+
+
+class SidecarArchiveTest(unittest.TestCase):
+    """sidecar/state.tar is optional. When present it is an identity archive."""
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory(prefix="idoris-bundle-sidecar-")
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name) / "bundle"
+        self.root.mkdir()
+        seed(self.root)
+        self.archive = self.root / "sidecar" / "state.tar"
+        self.archive.parent.mkdir(parents=True)
+
+    def test_tree_without_sidecar_archive_stays_valid(self) -> None:
+        self.archive.parent.rmdir()
+        got = run_bundle("tree", str(self.root))
+        self.assertEqual(got.returncode, 0, got.stderr)
+
+    def test_rejects_archive_without_regular_identity(self) -> None:
+        write_tar(self.archive, [("notes.txt", b"other\n")])
+        got = run_bundle("tree", str(self.root))
+        self.assertNotEqual(got.returncode, 0)
+        self.assertIn("tailscaled.state", got.stderr)
+        direct = run_bundle("sidecar-tar", str(self.archive))
+        self.assertNotEqual(direct.returncode, 0)
+        self.assertIn("tailscaled.state", direct.stderr)
+
+    def test_rejects_lookalike_and_directory_members(self) -> None:
+        write_tar(self.archive, [("tailscaled.state.bak", b"nope\n")])
+        got = run_bundle("sidecar-tar", str(self.archive))
+        self.assertNotEqual(got.returncode, 0)
+        self.assertIn("tailscaled.state", got.stderr)
+        write_tar(self.archive, [("tailscaled.state", None)])
+        got = run_bundle("sidecar-tar", str(self.archive))
+        self.assertNotEqual(got.returncode, 0)
+        self.assertIn("tailscaled.state", got.stderr)
+
+    def test_accepts_regular_nested_and_empty_identity(self) -> None:
+        write_tar(
+            self.archive,
+            [("tailscaled.state", b"node-key\n"), ("notes.txt", b"n\n")],
+        )
+        got = run_bundle("tree", str(self.root))
+        self.assertEqual(got.returncode, 0, got.stderr)
+        direct = run_bundle("sidecar-tar", str(self.archive))
+        self.assertEqual(direct.returncode, 0, direct.stderr)
+        self.assertEqual(direct.stdout, "")
+        write_tar(self.archive, [("var/lib/tailscale/tailscaled.state", b"")])
+        nested = run_bundle("sidecar-tar", str(self.archive))
+        self.assertEqual(nested.returncode, 0, nested.stderr)
+
+    def test_rejects_truncated_identity_archive(self) -> None:
+        raw = self.archive.with_suffix(".full.tar")
+        payload = b"R" * 20000
+        write_tar(raw, [("tailscaled.state", payload)])
+        self.archive.write_bytes(raw.read_bytes()[:512 + 100])
+        got = run_bundle("sidecar-tar", str(self.archive))
+        self.assertNotEqual(got.returncode, 0)
 
 
 if __name__ == "__main__":

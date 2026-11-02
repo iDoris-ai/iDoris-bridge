@@ -66,7 +66,7 @@ func rejectProvisionTree(root, logical string) error {
 		}
 		seen++
 		next := filepath.Join(acc, part)
-		fi, err := os.Lstat(next)
+		fi, err := os.Lstat(next) //nolint:gosec // G703: next is one component of a ReadWritePaths directory
 		if err != nil {
 			if os.IsNotExist(err) {
 				return rejectUntrustedParent(acc, logical)
@@ -92,7 +92,7 @@ func rejectUntrustedParent(parent, logical string) error {
 	if parent == "" || parent == string(os.PathSeparator) {
 		return nil
 	}
-	fi, err := os.Lstat(parent)
+	fi, err := os.Lstat(parent) //nolint:gosec // G703: parent is the directory that would contain a ReadWritePaths entry
 	if err != nil {
 		return err
 	}
@@ -136,7 +136,7 @@ func applyProvisionDest(root, logical string) error {
 	if err := chmodDirNoFollow(dest, 0o750); err != nil {
 		return err
 	}
-	fi, err := os.Lstat(dest)
+	fi, err := os.Lstat(dest) //nolint:gosec // G703: dest is a ReadWritePaths directory from the operator config
 	if err != nil {
 		return err
 	}
@@ -153,7 +153,7 @@ func applyProvisionDest(root, logical string) error {
 // symlink. An existing real directory is left for the caller to chmod.
 func mkdirProvision(dest string) error {
 	dest = filepath.Clean(dest)
-	fi, err := os.Lstat(dest)
+	fi, err := os.Lstat(dest) //nolint:gosec // G703: dest is a ReadWritePaths directory from the operator config
 	if err == nil {
 		if fi.Mode()&os.ModeSymlink != 0 {
 			return fmt.Errorf("config: %s is a symlink; the system service will not follow it", dest)
@@ -172,10 +172,10 @@ func mkdirProvision(dest string) error {
 			return err
 		}
 	}
-	if err := os.Mkdir(dest, 0o750); err != nil && !os.IsExist(err) {
+	if err := os.Mkdir(dest, 0o750); err != nil && !os.IsExist(err) { //nolint:gosec // G703: dest is a ReadWritePaths directory from the operator config
 		return err
 	}
-	fi, err = os.Lstat(dest)
+	fi, err = os.Lstat(dest) //nolint:gosec // G703: dest is a ReadWritePaths directory from the operator config
 	if err != nil {
 		return err
 	}
@@ -193,7 +193,7 @@ func mkdirProvisionParents(dir string) error {
 	if dir == "" || dir == "." || dir == string(filepath.Separator) {
 		return nil
 	}
-	fi, err := os.Lstat(dir)
+	fi, err := os.Lstat(dir) //nolint:gosec // G703: dir is a parent of a ReadWritePaths directory
 	if err == nil {
 		if fi.Mode()&os.ModeSymlink != 0 {
 			return fmt.Errorf("config: %s is a symlink; the system service will not follow it", dir)
@@ -212,10 +212,10 @@ func mkdirProvisionParents(dir string) error {
 			return err
 		}
 	}
-	if err := os.Mkdir(dir, 0o750); err != nil && !os.IsExist(err) {
+	if err := os.Mkdir(dir, 0o750); err != nil && !os.IsExist(err) { //nolint:gosec // G703: dir is a parent of a ReadWritePaths directory
 		return err
 	}
-	fi, err = os.Lstat(dir)
+	fi, err = os.Lstat(dir) //nolint:gosec // G703: dir is a parent of a ReadWritePaths directory
 	if err != nil {
 		return err
 	}

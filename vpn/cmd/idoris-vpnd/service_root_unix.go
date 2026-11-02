@@ -15,5 +15,7 @@ func requireRoot() error {
 }
 
 func chownSystemRootImpl(path string) error {
-	return os.Chown(path, 0, 0) //nolint:gosec // G703: path is an install directory or the protected executable
+	// Lchown does not follow a symlink that replaced the path after the
+	// installer checked it. A real directory or regular file is unchanged.
+	return os.Lchown(path, 0, 0) //nolint:gosec // G703: path is an install directory or the protected executable
 }

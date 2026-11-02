@@ -182,6 +182,9 @@ func systemReadWritePaths(cfgJSON []byte) ([]string, error) {
 		if err := rejectSharedRuntime(p); err != nil {
 			return err
 		}
+		if err := rejectSharedProvisionTarget(p); err != nil {
+			return err
+		}
 		// A path under /run disappears on reboot. List only /run/<name>, which
 		// RuntimeDirectory recreates. The parent is writable, so the daemon
 		// can create anything nested below it. Listing the nested path would
@@ -190,6 +193,9 @@ func systemReadWritePaths(cfgJSON []byte) ([]string, error) {
 		if top, _ := runtimeDir(p); top != "" {
 			collapsed := "/run/" + top
 			if err := rejectSharedRuntime(collapsed); err != nil {
+				return err
+			}
+			if err := rejectSharedProvisionTarget(collapsed); err != nil {
 				return err
 			}
 			return appendReadWrite(&paths, collapsed)
@@ -252,11 +258,18 @@ func addStateFile(paths *[]string, p string) error {
 	if err := rejectSharedRuntime(parent); err != nil {
 		return fmt.Errorf("config: state_file parent %s is a shared runtime directory. Put state_file under /var/lib/idoris", parent)
 	}
+	if err := rejectSharedProvisionTarget(parent); err != nil {
+		return err
+	}
 	if top, _ := runtimeDir(parent); top != "" {
 		if top == "user" {
 			return fmt.Errorf("config: state_file parent %s is a shared runtime directory. Put state_file under /var/lib/idoris", parent)
 		}
-		return appendReadWrite(paths, "/run/"+top)
+		collapsed := "/run/" + top
+		if err := rejectSharedProvisionTarget(collapsed); err != nil {
+			return err
+		}
+		return appendReadWrite(paths, collapsed)
 	}
 	return appendReadWrite(paths, parent)
 }
@@ -269,6 +282,53 @@ func appendReadWrite(paths *[]string, p string) error {
 	}
 	*paths = append(*paths, p)
 	return nil
+}
+
+// rejectSharedProvisionTarget refuses a directory the service does not own
+// when that directory is itself the path the installer would create or
+// chmod. Ancestors such as /srv stay untouched when the target is /srv/idoris.
+// A path under a world-writable shared directory is refused as well: another
+// local user can plant a symlink there before the installer runs.
+func rejectSharedProvisionTarget(p string) error {
+	p = path.Clean(p)
+	if isSharedProvisionTarget(p) {
+		return fmt.Errorf("config: %s is a shared directory the service does not own. The system service will not change it", p)
+	}
+	if isUnderWorldWritableShared(p) {
+		return fmt.Errorf("config: %s is under a shared directory the service does not own. The system service will not follow or change it", p)
+	}
+	return nil
+}
+
+func isSharedProvisionTarget(p string) bool {
+	switch p {
+	case "/",
+		"/bin", "/boot", "/dev", "/etc", "/home", "/lib", "/lib64",
+		"/media", "/mnt", "/opt", "/proc", "/root", "/run", "/sbin",
+		"/srv", "/sys", "/tmp", "/usr", "/var",
+		"/dev/shm", "/run/lock", "/run/user",
+		"/usr/bin", "/usr/lib", "/usr/local", "/usr/sbin",
+		"/var/cache", "/var/lib", "/var/lock", "/var/log", "/var/run",
+		"/var/spool", "/var/tmp",
+		"/var/run/user":
+		return true
+	}
+	if rest, ok := strings.CutPrefix(p, "/home/"); ok && rest != "" && !strings.Contains(rest, "/") {
+		return true
+	}
+	if rest, ok := strings.CutPrefix(p, "/Users/"); ok && rest != "" && !strings.Contains(rest, "/") {
+		return true
+	}
+	return false
+}
+
+func isUnderWorldWritableShared(p string) bool {
+	for _, prefix := range []string{"/tmp/", "/var/tmp/", "/dev/shm/", "/run/lock/", "/var/lock/"} {
+		if strings.HasPrefix(p, prefix) {
+			return true
+		}
+	}
+	return false
 }
 
 // rejectSharedRuntime refuses an ancestor the service does not own. The
@@ -304,30 +364,21 @@ func runtimeDir(p string) (top string, nested bool) {
 	return name, ok && sub != ""
 }
 
-// provisionSystemPaths creates every ReadWritePaths entry. root is empty on
-// a real install. Tests pass a temp directory; the absolute path's leading
-// slash is stripped before joining, because filepath.Join drops the parent
-// when the child is absolute.
+// provisionSystemPaths creates every ReadWritePaths entry the service owns.
+// root is empty on a real install. Tests pass a temp directory; the absolute
+// path's leading slash is stripped before joining, because filepath.Join
+// drops the parent when the child is absolute. Shared directories and
+// symlinks are rejected before any directory is created or chmod'd.
 func provisionSystemPaths(root string, cfgJSON []byte) error {
+	if err := preflightSystemPaths(root, cfgJSON); err != nil {
+		return err
+	}
 	paths, err := systemReadWritePaths(cfgJSON)
 	if err != nil {
 		return err
 	}
 	for _, p := range paths {
-		if err := rejectSharedRuntime(p); err != nil {
-			return err
-		}
-		dest := p
-		if root != "" {
-			dest = filepath.Join(root, strings.TrimPrefix(p, "/"))
-		}
-		if err := os.MkdirAll(dest, 0o750); err != nil {
-			return err
-		}
-		if err := os.Chmod(dest, 0o750); err != nil { //nolint:gosec // directory must stay traversable; 0750 is the required mode
-			return err
-		}
-		if err := chownSystemRoot(dest); err != nil {
+		if err := applyProvisionDest(root, p); err != nil {
 			return err
 		}
 	}
@@ -390,6 +441,11 @@ func installSystemdSystem(configPath string) error {
 	if err != nil {
 		return err
 	}
+	// Reject a shared directory or a symlink before staging, and before the
+	// installed binary or config is replaced.
+	if err := preflightSystemPaths("", cfg); err != nil {
+		return err
+	}
 	// Validate the unit and stage secrets before the installed binary or any
 	// live file is replaced. A rejected listener or a missing credential
 	// leaves the previous installation in place.
@@ -398,16 +454,17 @@ func installSystemdSystem(configPath string) error {
 		return err
 	}
 	defer func() { _ = os.RemoveAll(stage) }() //nolint:gosec // G703: stage is the directory prepareSystemInstall just created
+	// Every ReadWritePaths entry has to exist before systemd builds the
+	// namespace. Create those directories before the live executable or
+	// config is replaced, so a symlink raced in after the preflight still
+	// fails closed without committing the new installation.
+	if err := provisionSystemPaths("", installed); err != nil {
+		return err
+	}
 	if err := copyProtectedExecutable(src, exeDir, exe); err != nil {
 		return err
 	}
 	if err := finishSystemInstall(stage, systemStateDir, systemConfigPath, installed); err != nil {
-		return err
-	}
-	// Every ReadWritePaths entry has to exist before systemd builds the
-	// namespace. StateDirectory and RuntimeDirectory recreate /var/lib/idoris
-	// and /run/idoris on boot; nested state directories are created here.
-	if err := provisionSystemPaths("", installed); err != nil {
 		return err
 	}
 	if err := os.WriteFile(systemUnitPath, []byte(unit), 0o600); err != nil { //nolint:gosec // fixed unit path under /etc/systemd/system

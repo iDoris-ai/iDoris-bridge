@@ -1815,7 +1815,11 @@ tar_path, dest = sys.argv[1:]
 with tarfile.open(tar_path, "r:*") as tf:
     wanted = None
     for member in tf.getmembers():
-        name = member.name.replace("\\", "/").lstrip("./")
+        name = member.name.replace("\\", "/")
+        # Same one-prefix rule as bundle._is_tailscaled_state. lstrip("./")
+        # would treat ".tailscaled.state" as the identity.
+        if name.startswith("./"):
+            name = name[2:]
         if name == "tailscaled.state" or name.endswith("/tailscaled.state"):
             if member.isfile():
                 wanted = member

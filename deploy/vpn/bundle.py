@@ -159,9 +159,14 @@ def parse_dotenv(text: str) -> dict:
 
 
 def _is_tailscaled_state(name: str) -> bool:
-    # Same normalisation as the rollback checksum. lstrip treats "." and "/"
-    # as a character set, which matches the names tar actually writes.
-    key = name.replace("\\", "/").lstrip("./")
+    # tar -T records the find path: "./tailscaled.state" or
+    # "./sub/tailscaled.state". Strip one leading "./" prefix. Do not use
+    # str.lstrip("./"): that character set also accepts ".tailscaled.state"
+    # and "./..tailscaled.state". The rollback checksum in ops-lib.sh uses
+    # the same one-prefix rule.
+    key = name.replace("\\", "/")
+    if key.startswith("./"):
+        key = key[2:]
     return key == "tailscaled.state" or key.endswith("/tailscaled.state")
 
 

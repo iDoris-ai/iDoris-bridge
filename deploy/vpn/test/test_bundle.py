@@ -176,6 +176,26 @@ class SidecarArchiveTest(unittest.TestCase):
         self.assertNotEqual(got.returncode, 0)
         self.assertIn("tailscaled.state", got.stderr)
 
+    def test_rejects_lstrip_lookalikes_and_accepts_dot_slash(self) -> None:
+        # str.lstrip("./") strips every leading "." and "/", so these names
+        # used to count as tailscaled.state and validate_tar would allow a
+        # destructive restore.
+        for name in (
+            ".tailscaled.state",
+            "./..tailscaled.state",
+            "./.tailscaled.state",
+        ):
+            write_tar(self.archive, [(name, b"lookalike\n")])
+            got = run_bundle("sidecar-tar", str(self.archive))
+            self.assertNotEqual(got.returncode, 0, name)
+            self.assertIn("no regular tailscaled.state", got.stderr, name)
+        write_tar(self.archive, [("./tailscaled.state", b"node-key\n")])
+        got = run_bundle("sidecar-tar", str(self.archive))
+        self.assertEqual(got.returncode, 0, got.stderr)
+        write_tar(self.archive, [("./sub/tailscaled.state", b"node-key\n")])
+        nested = run_bundle("sidecar-tar", str(self.archive))
+        self.assertEqual(nested.returncode, 0, nested.stderr)
+
     def test_accepts_regular_nested_and_empty_identity(self) -> None:
         write_tar(
             self.archive,

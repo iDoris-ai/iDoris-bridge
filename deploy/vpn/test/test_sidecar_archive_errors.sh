@@ -147,6 +147,64 @@ fi
 got="$(read_identity)"
 [[ "$got" == "$live" ]] || note_bug "snapshot changed live identity to [${got}]"
 
+echo "test: find failure is not a successful backup or confirmed absence"
+reset_identity "$live" "$planted"
+# The find that must fail runs inside the image. A failing function in front
+# of the real script still executes "find ... || exit 1". Changing that to
+# "|| true" makes this an exit-42 omission, which the assertions reject.
+docker() {
+  local last="" arg
+  for arg in "$@"; do
+    last="$arg"
+  done
+  if [[ "${1:-}" == run && "$last" == *'find . -type f ! -name "*.sock"'* ]]; then
+    local args=("$@")
+    args[${#args[@]} - 1]="find() { echo find-failed >&2; return 1; }
+${last}"
+    command docker "${args[@]}"
+    return
+  fi
+  command docker "$@"
+}
+find_dest="$work/find-backup/sidecar/state.tar"
+set +e
+(
+  set -euo pipefail
+  copy_sidecar_state "$find_dest"
+) >"$work/find-backup.out" 2>"$work/find-backup.err"
+find_backup_rc=$?
+set -e
+if [[ "$find_backup_rc" -eq 0 || -e "$find_dest" ]] || grep -q 'no tailscaled.state' "$work/find-backup.err"; then
+  note_bug "backup treated find failure as success or absence rc=${find_backup_rc}"
+  cat "$work/find-backup.err" >&2 || true
+elif ! grep -q 'find-failed' "$work/find-backup.err"; then
+  note_bug "find failure injection did not run: $(cat "$work/find-backup.err")"
+else
+  echo "ok: backup rejects a find failure (rc=${find_backup_rc})"
+fi
+got="$(read_identity)"
+notes="$(notes_flag)"
+[[ "$got" == "$live" && "$notes" == "NOTES" ]] || note_bug "find failure backup changed volume identity=[${got}] notes=${notes}"
+mkdir -p "$work/snap-find"
+set +e
+(
+  _snapshot_sidecar_state "$work/snap-find"
+) >"$work/snap-find.out" 2>"$work/snap-find.err"
+find_snap_rc=$?
+set -e
+if [[ "$find_snap_rc" -eq 0 || -e "$work/snap-find/sidecar-state.tar" || -e "$work/snap-find/sidecar-absent" ]]; then
+  note_bug "snapshot treated find failure as captured or absent rc=${find_snap_rc}"
+  cat "$work/snap-find.err" >&2 || true
+elif ! grep -q 'find-failed' "$work/snap-find.err"; then
+  note_bug "snapshot find injection did not run: $(cat "$work/snap-find.err")"
+else
+  echo "ok: snapshot rejects a find failure (rc=${find_snap_rc})"
+fi
+unset -f docker
+got="$(read_identity)"
+notes="$(notes_flag)"
+[[ "$got" == "$live" && "$notes" == "NOTES" ]] || note_bug "find failure snapshot changed volume identity=[${got}] notes=${notes}"
+
 echo "test: archive without tailscaled.state does not delete the live identity"
 reset_identity "$live" "$planted"
 mkdir -p "$work/snap-missing"
@@ -233,6 +291,11 @@ clean_dest="$work/clean-backup/state.tar"
 copy_sidecar_state "$clean_dest" || die "clean backup failed"
 [[ -s "$clean_dest" ]] || die "clean backup wrote no archive"
 python3 "$root/bundle.py" sidecar-tar "$clean_dest" || die "clean backup archive failed validation"
+echo "test: a streamed ./tailscaled.state snapshot still restores"
+reset_identity "replaced-identity" ""
+_restore_sidecar_volume "$work/snap-clean" || die "streamed snapshot restore failed"
+got="$(read_identity)"
+[[ "$got" == "$live" ]] || die "streamed snapshot restored [${got}]"
 
 echo "test: no tailscaled.state is omitted, including a lookalike name"
 docker run --rm --network none -v "${sid_vol}:/data" "$alpine" \

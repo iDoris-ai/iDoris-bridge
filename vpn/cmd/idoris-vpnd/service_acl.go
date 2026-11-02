@@ -128,8 +128,32 @@ func copyCredentialFile(src, dest string) error {
 	if err != nil {
 		return err
 	}
-	if err := os.WriteFile(dest, b, 0o600); err != nil { //nolint:gosec // G703: dest is the install copy of an operator credential file
+	// O_EXCL: a file planted in the stage keeps its bytes. Do not chmod it.
+	return writeStagedInstallFile(dest, b, 0o600)
+}
+
+// writeStagedInstallFile creates dest and leaves a preexisting file alone.
+// Staging runs before the directory ACL is known to exclude other users, so
+// truncating an existing file would write the secret into a file an attacker
+// already has open.
+func writeStagedInstallFile(dest string, data []byte, mode os.FileMode) error {
+	f, err := os.OpenFile(dest, os.O_CREATE|os.O_EXCL|os.O_WRONLY, mode) //nolint:gosec // G302: new staged file; mode is 0600 for secrets and config
+	if err != nil {
 		return err
 	}
-	return os.Chmod(dest, 0o600) //nolint:gosec // credential copy is mode 0600 before the ACL is applied
+	_, werr := f.Write(data)
+	cerr := f.Close()
+	if werr != nil {
+		_ = os.Remove(dest) //nolint:gosec // G703: dest is the staged file this call created
+		return werr
+	}
+	if cerr != nil {
+		_ = os.Remove(dest) //nolint:gosec // G703: dest is the staged file this call created
+		return cerr
+	}
+	if err := os.Chmod(dest, mode); err != nil { //nolint:gosec // G302: staged secret or config is mode 0600
+		_ = os.Remove(dest) //nolint:gosec // G703: dest is the staged file this call created
+		return err
+	}
+	return nil
 }

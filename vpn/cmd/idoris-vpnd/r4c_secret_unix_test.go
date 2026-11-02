@@ -82,13 +82,26 @@ func TestR4CStageSystemSecretsRewritesPath(t *testing.T) {
 		t.Fatalf("staged body %q", body)
 	}
 
+	kept, err := os.ReadFile(want)
+	if err != nil {
+		t.Fatal(err)
+	}
 	missing := filepath.Join(dir, "missing-key")
-	_, err = stageSystemSecrets([]byte(fmt.Sprintf(`{"enroll_token_file":%q,"auth_key_file":%q}`, token, missing)), dest)
+	failed := filepath.Join(dir, "state-failed")
+	_, err = stageSystemSecrets([]byte(fmt.Sprintf(`{"enroll_token_file":%q,"auth_key_file":%q}`, token, missing)), failed)
 	if err == nil {
 		t.Fatal("missing auth key was staged")
 	}
-	if _, statErr := os.Stat(filepath.Join(dest, "enroll_token")); statErr == nil {
+	if _, statErr := os.Stat(filepath.Join(failed, "enroll_token")); statErr == nil {
 		t.Fatal("partial enroll_token copy was left behind")
+	}
+	// A failed retry must not truncate the credential already staged.
+	again, err := os.ReadFile(want)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(again) != string(kept) {
+		t.Fatalf("existing staged credential changed from %q to %q", kept, again)
 	}
 }
 

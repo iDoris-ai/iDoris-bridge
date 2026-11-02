@@ -817,12 +817,16 @@ func (d *deps) confirmAuthority(authority, expect string, yes bool) error {
 	return nil
 }
 
-// requireRegular stats path and refuses anything that is not a regular file.
-// Stat does not open a fifo, so this returns instead of blocking.
+// requireRegular refuses a symlink, a fifo, or anything else that is not a
+// regular file. Lstat does not follow a link and does not open a fifo, so
+// this returns instead of reading the target or blocking.
 func requireRegular(host fileHost, path, what string) error {
-	info, err := host.Stat(path)
+	info, err := host.Lstat(path)
 	if err != nil {
 		return fmt.Errorf("gateway apply: %s: %w", what, err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("gateway apply: %s is a symlink", what)
 	}
 	if !info.Mode().IsRegular() {
 		return fmt.Errorf("gateway apply: %s is not a regular file", what)

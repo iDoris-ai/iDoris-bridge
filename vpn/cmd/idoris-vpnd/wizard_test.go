@@ -257,6 +257,10 @@ func (m *fakeOS) Stat(path string) (os.FileInfo, error) {
 		m.stats = map[string]int{}
 	}
 	m.stats[path]++
+	return m.Lstat(path)
+}
+
+func (m *fakeOS) Lstat(path string) (os.FileInfo, error) {
 	if _, ok := m.files[path]; !ok {
 		return nil, os.ErrNotExist
 	}
@@ -755,6 +759,26 @@ func TestGatewayApplyRejectsCraftedAuthorityPlan(t *testing.T) {
 	}
 	if strings.Contains(d.out()+d.errOut(), testToken) {
 		t.Fatal("error path printed the token")
+	}
+}
+
+func TestGatewayApplyRejectsSymlinkPlanOnDisk(t *testing.T) {
+	dir := t.TempDir()
+	real := filepath.Join(dir, "real-plan.json")
+	if err := os.WriteFile(real, []byte("{\"role\":\"member\"}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(dir, "plan.json")
+	if err := os.Symlink(real, link); err != nil {
+		t.Skip("symlink unsupported: " + err.Error())
+	}
+	d := deps{
+		stdin: strings.NewReader(""), stdout: &bytes.Buffer{}, stderr: &bytes.Buffer{},
+		host: osHost{},
+	}
+	err := gatewayCmd([]string{"apply", "--plan", link}, d)
+	if err == nil || !strings.Contains(err.Error(), "symlink") {
+		t.Fatalf("%v", err)
 	}
 }
 

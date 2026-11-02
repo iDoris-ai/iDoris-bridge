@@ -23,6 +23,9 @@ type Host interface {
 	WriteFile(path string, data []byte, mode os.FileMode) error
 	MkdirAll(path string, mode os.FileMode) error
 	Stat(path string) (os.FileInfo, error)
+	// Lstat does not follow a symlink. Plan replay uses it so a link named
+	// like the approved token cannot stand in for another file.
+	Lstat(path string) (os.FileInfo, error)
 	Chmod(path string, mode os.FileMode) error
 	ReadFile(path string) ([]byte, error)
 	IsRoot() bool

@@ -279,6 +279,103 @@ func TestPlanReplayRejectsSpecialFiles(t *testing.T) {
 	})
 }
 
+func TestPlanReplayRejectsSymlinkStandIn(t *testing.T) {
+	const (
+		secret = "/home/acme/.idoris/enroll.token"
+		cfg    = "/tmp/attacker/vpn.json"
+		link   = "/tmp/attacker/enroll.token"
+	)
+	base := newMemHost(false, "linux")
+	base.files[secret] = []byte(replayToken + "\n")
+	base.modes[secret] = 0o600
+	base.files[cfg] = []byte("{\n  \"enroll_url\": \"https://evil.example\",\n  \"enroll_token_file\": \"" + link + "\"\n}\n")
+	base.modes[cfg] = 0o600
+	base.links = map[string]string{link: secret}
+	h := &trackHost{memHost: base}
+	planPath := PathsFor("", cfg).Plan
+	p := replayMemberPlan(t, "https://evil.example", cfg, link)
+	err := CheckPlanReplay(p, planPath, h, false)
+	if err == nil || !strings.Contains(err.Error(), "symlink") {
+		t.Fatal(err)
+	}
+	if h.read[secret] != 0 || h.read[link] != 0 {
+		t.Fatalf("read the token through the symlink: %#v", h.read)
+	}
+	if string(base.files[secret]) != replayToken+"\n" {
+		t.Fatal("secret bytes changed")
+	}
+	if _, err := Apply(p, h, ApplyOptions{Token: replayToken, PlanPath: planPath, Replay: true}); err == nil {
+		t.Fatal("replay apply followed the token symlink")
+	}
+
+	realCfg := "/home/acme/.idoris/vpn.json"
+	linkedCfg := "/tmp/attacker/linked.json"
+	base.links[linkedCfg] = realCfg
+	base.files[realCfg] = []byte("{\n  \"enroll_url\": \"https://enroll.good\",\n  \"enroll_token_file\": \"" + secret + "\"\n}\n")
+	base.modes[realCfg] = 0o600
+	linked := replayMemberPlan(t, "https://evil.example", linkedCfg, link)
+	err = CheckPlanReplay(linked, PathsFor("", linkedCfg).Plan, h, true)
+	if err == nil || !strings.Contains(err.Error(), "symlink") {
+		t.Fatal(err)
+	}
+	if h.read[realCfg] != 0 || h.read[linkedCfg] != 0 {
+		t.Fatalf("read the config through the symlink: %#v", h.read)
+	}
+}
+
+func TestPlanReplayRejectsTokenSymlinkOnDisk(t *testing.T) {
+	dir := t.TempDir()
+	secret := filepath.Join(dir, "victim", "enroll.token")
+	if err := os.Mkdir(filepath.Dir(secret), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(secret, []byte(replayToken+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfgDir := filepath.Join(dir, "attacker")
+	if err := os.Mkdir(cfgDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(cfgDir, "enroll.token")
+	if err := os.Symlink(secret, link); err != nil {
+		t.Skip("symlink unsupported: " + err.Error())
+	}
+	cfg := filepath.Join(cfgDir, "vpn.json")
+	body := "{\n  \"enroll_url\": \"https://evil.example\",\n  \"enroll_token_file\": \"" + link + "\"\n}\n"
+	if err := os.WriteFile(cfg, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	planPath := PathsFor("", cfg).Plan
+	p := replayMemberPlan(t, "https://evil.example", cfg, link)
+	err := CheckPlanReplay(p, planPath, replayDiskHost{}, false)
+	if err == nil || !strings.Contains(err.Error(), "symlink") {
+		t.Fatal(err)
+	}
+	got, readErr := os.ReadFile(secret)
+	if readErr != nil || string(got) != replayToken+"\n" {
+		t.Fatalf("secret changed: %v %q", readErr, got)
+	}
+}
+
+type replayDiskHost struct{}
+
+func (replayDiskHost) WriteFile(path string, data []byte, mode os.FileMode) error {
+	return os.WriteFile(path, data, mode)
+}
+func (replayDiskHost) MkdirAll(path string, mode os.FileMode) error {
+	return os.MkdirAll(path, mode)
+}
+func (replayDiskHost) Stat(path string) (os.FileInfo, error)  { return os.Stat(path) }
+func (replayDiskHost) Lstat(path string) (os.FileInfo, error) { return os.Lstat(path) }
+func (replayDiskHost) Chmod(path string, mode os.FileMode) error {
+	return os.Chmod(path, mode)
+}
+func (replayDiskHost) ReadFile(path string) ([]byte, error) { return os.ReadFile(path) } //nolint:gosec // test path
+func (replayDiskHost) IsRoot() bool                         { return false }
+func (replayDiskHost) GOOS() string                         { return "linux" }
+func (replayDiskHost) EnableIPForward(string, string) error { return nil }
+func (replayDiskHost) InstallService(string) error          { return nil }
+
 func TestConfirmedApplyStillCreatesAConfig(t *testing.T) {
 	cfg := "/home/acme/fresh/vpn.json"
 	paths := PathsFor("", cfg)

@@ -45,15 +45,8 @@ func CheckPlanReplay(plan Plan, planPath string, host Host, replace bool) error 
 	if filepath.Clean(gotPlan) != filepath.Clean(wantPlan) {
 		return fmt.Errorf("gateway: refusing plan %s: it is not the plan owned by %s", planPath, configPath)
 	}
-	info, err := host.Stat(configPath)
-	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return fmt.Errorf("gateway: refusing plan replay: %s does not exist", configPath)
-		}
+	if err := lstatRegular(host, configPath, "config "+configPath); err != nil {
 		return err
-	}
-	if !info.Mode().IsRegular() {
-		return fmt.Errorf("gateway: config %s is not a regular file", configPath)
 	}
 	existing, have, err := readExistingConfig(host, configPath)
 	if err != nil {
@@ -91,15 +84,28 @@ func CheckPlanReplay(plan Plan, planPath string, host Host, replace bool) error 
 	if oldURL != plan.EnrollURL && !replace {
 		return fmt.Errorf("gateway: %s is already enrolled with %s; pass --replace to switch it to %s", configPath, oldURL, plan.EnrollURL)
 	}
-	tokInfo, err := host.Stat(tok)
+	if err := lstatRegular(host, tok, "token file "+tok); err != nil {
+		return err
+	}
+	return nil
+}
+
+// lstatRegular refuses a missing path, a symlink, and any non-regular file.
+// Stat would follow the symlink and report the target, which lets a plan name
+// a link inside the config directory and read a token that lives elsewhere.
+func lstatRegular(host Host, path, what string) error {
+	info, err := host.Lstat(path)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			return fmt.Errorf("gateway: refusing plan replay: token file %s does not exist", tok)
+			return fmt.Errorf("gateway: refusing plan replay: %s does not exist", path)
 		}
 		return err
 	}
-	if !tokInfo.Mode().IsRegular() {
-		return fmt.Errorf("gateway: token file %s is not a regular file", tok)
+	if info.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("gateway: refusing plan replay: %s is a symlink", path)
+	}
+	if !info.Mode().IsRegular() {
+		return fmt.Errorf("gateway: %s is not a regular file", what)
 	}
 	return nil
 }

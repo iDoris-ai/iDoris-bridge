@@ -769,16 +769,22 @@ func TestENOSPCDoesNotUnlockRead(t *testing.T) {
 	}
 }
 
-// TestPythonReplaceLeavesStaleBakThatEmptyReadRestores is the cross-language
-// recovery contract. Revoke writes the removed hash into .bak and the new
-// bytes in place. Python then renames a new inode over the config under the
-// same <config>.lock and does not touch .bak. An empty live file is not the
-// Python rename crash window once that writer fsyncs; it is later truncation
-// or other corruption. readConfigBytes still treats empty as Go's own
-// truncate window and writes the stale backup back, so the revoked hash
-// returns. This test locks that behavior so a durability change cannot claim
-// fsync closed it.
-func TestPythonReplaceLeavesStaleBakThatEmptyReadRestores(t *testing.T) {
+// pythonPublish is one finished Python replace of a config Go has already revoked.
+type pythonPublish struct {
+	path      string
+	bakBefore []byte
+	livePerm  os.FileMode
+	h0        string
+	h1        string
+}
+
+// publishPythonReplacement revokes one hash, then runs the real Python
+// locked_update. The contract checked here is only the publish: a new inode,
+// the same lock inode, the revoked hash absent from the live file, and .bak
+// bytes, mode, and owner left untouched. It does not truncate the live file
+// and it does not treat a later restore of that .bak as success.
+func publishPythonReplacement(t *testing.T) pythonPublish {
+	t.Helper()
 	if _, err := exec.LookPath("python3"); err != nil {
 		t.Skip("python3 is required")
 	}
@@ -878,34 +884,54 @@ func TestPythonReplaceLeavesStaleBakThatEmptyReadRestores(t *testing.T) {
 	if liveUID != prevLiveUID || liveGID != prevLiveGID {
 		t.Fatalf("live owner %d:%d, was %d:%d", liveUID, liveGID, prevLiveUID, prevLiveGID)
 	}
+	return pythonPublish{
+		path:      path,
+		bakBefore: bakBefore,
+		livePerm:  liveSt.Mode().Perm(),
+		h0:        h0,
+		h1:        h1,
+	}
+}
 
-	// External truncation of a publish that already completed. Not the
-	// crash window closed by fsync-before-replace.
-	if err := os.WriteFile(path, nil, liveSt.Mode().Perm()); err != nil {
+// TestPythonReplaceKeepsStaleBakWithoutPublishingRevokedHash is the contract
+// of the fsync-before-rename writer. Python publishes a new inode and leaves
+// the revoked hash out of that file. It does not refresh .bak.
+func TestPythonReplaceKeepsStaleBakWithoutPublishingRevokedHash(t *testing.T) {
+	publishPythonReplacement(t)
+}
+
+// TestOpenLimitLaterTruncateRestoresStaleBak records a hole this change does
+// not close. After the Python publish has finished, emptying the live file
+// still makes ReadFileLocked copy the old .bak, and that backup still holds
+// the revoked hash. A pass means the hash comes back. That is not the desired
+// recovery behavior, and fsync does not close it. A later recovery change
+// replaces this test in the same commit.
+func TestOpenLimitLaterTruncateRestoresStaleBak(t *testing.T) {
+	pub := publishPythonReplacement(t)
+	if err := os.WriteFile(pub.path, nil, pub.livePerm); err != nil {
 		t.Fatal(err)
 	}
-	pythonInode := configInode(t, path)
-	got, err := ReadFileLocked(path)
+	pythonInode := configInode(t, pub.path)
+	got, err := ReadFileLocked(pub.path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !bytes.Equal(got, bakBefore) || !bytes.Contains(got, []byte(h0)) {
-		t.Fatal("empty file did not restore the stale bak")
+	if !bytes.Equal(got, pub.bakBefore) || !bytes.Contains(got, []byte(pub.h0)) {
+		t.Fatal("open limit changed shape: an empty file no longer restored the stale bak. Record the new recovery in the commit that changes it")
 	}
-	disk, err := os.ReadFile(path)
+	disk, err := os.ReadFile(pub.path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !bytes.Equal(disk, bakBefore) {
-		t.Fatal("restore did not write bak back to disk")
+	if !bytes.Equal(disk, pub.bakBefore) {
+		t.Fatal("open limit changed shape: restore did not write bak back to disk")
 	}
-	if configInode(t, path) != pythonInode {
+	if configInode(t, pub.path) != pythonInode {
 		t.Fatal("restore replaced the inode Python published")
 	}
-	if bytes.Contains(disk, []byte(h0)) && bytes.Contains(disk, []byte(h1)) {
-		return
+	if !bytes.Contains(disk, []byte(pub.h1)) {
+		t.Fatal("restored backup lost the hash revoke kept")
 	}
-	t.Fatal("restored backup lost a hash from the pre-revoke generation")
 }
 
 func enrollDeployDir(t *testing.T) string {

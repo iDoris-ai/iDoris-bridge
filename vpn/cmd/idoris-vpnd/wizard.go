@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"context"
+	"errors"
 	"io"
 	"os"
 
@@ -30,10 +31,10 @@ func realDeps() deps {
 }
 
 func joinCmd(args []string, d deps) error {
-	panic("stub")
+	return errors.New("join: not implemented yet")
 }
 func gatewayCmd(args []string, d deps) error {
-	panic("stub")
+	return errors.New("gateway: not implemented yet")
 }
 
 func init() {

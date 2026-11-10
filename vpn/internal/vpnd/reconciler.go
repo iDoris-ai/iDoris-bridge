@@ -270,6 +270,15 @@ func (r *Reconciler) stepForeign(ctx context.Context, st *ipnstate.Status, prefs
 	if err != nil {
 		return r.fail(fmt.Errorf("profile status: %w", err)), err
 	}
+	// Check takeover before any profile switch. An existing iDoris profile
+	// must not pull a running foreign tailnet off when takeover is disabled.
+	foreignRunning := st.BackendState == ipn.Running.String() && prefs.ControlURL != ""
+	if foreignRunning && !r.opt.Takeover {
+		return r.set(func(s *Snapshot) {
+			s.Phase = PhaseBlocked
+			s.LastError = fmt.Sprintf("tailscaled is logged into %s; takeover disabled", prefs.ControlURL)
+		}), nil
+	}
 	for _, p := range all {
 		if p.ID != "" && p.ID != cur.ID && SameControlURL(p.ControlURL, r.opt.ControlURL) {
 			r.log.Info("switching to existing iDoris profile", "profile", p.ID, "from", cur.ID)
@@ -281,13 +290,6 @@ func (r *Reconciler) stepForeign(ctx context.Context, st *ipnstate.Status, prefs
 			}
 			return r.set(func(s *Snapshot) { s.Phase = PhaseSwitching }), nil
 		}
-	}
-	foreignRunning := st.BackendState == ipn.Running.String() && prefs.ControlURL != ""
-	if foreignRunning && !r.opt.Takeover {
-		return r.set(func(s *Snapshot) {
-			s.Phase = PhaseBlocked
-			s.LastError = fmt.Sprintf("tailscaled is logged into %s; takeover disabled", prefs.ControlURL)
-		}), nil
 	}
 	if r.recentLogin() {
 		return r.set(func(s *Snapshot) { s.Phase = PhaseStarting }), nil

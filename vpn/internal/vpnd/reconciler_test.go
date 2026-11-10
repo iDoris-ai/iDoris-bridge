@@ -333,6 +333,32 @@ func TestForeignTailnetBlockedWithoutTakeover(t *testing.T) {
 	}
 }
 
+func TestExistingIdorisProfileDoesNotTakeoverWhenDisabled(t *testing.T) {
+	be := &fakeBackend{
+		state:   ipn.Running,
+		prefs:   ipn.Prefs{ControlURL: "https://controlplane.tailscale.com", WantRunning: true},
+		current: ipn.LoginProfile{ID: "p-saas", ControlURL: "https://controlplane.tailscale.com"},
+		profiles: []ipn.LoginProfile{
+			{ID: "p-saas", ControlURL: "https://controlplane.tailscale.com"},
+			{ID: "p-idoris", ControlURL: ours + "/"},
+		},
+	}
+	keys := &countingKeys{}
+	r := newR(t, be, keys, func(o *Options) { o.Takeover = false })
+	snap, err := r.Step(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snap.Phase != PhaseBlocked || keys.n != 0 {
+		t.Fatalf("expected blocked: %+v", snap)
+	}
+	for _, call := range be.calls {
+		if call == "SwitchProfile:p-idoris" || call == "SwitchToEmptyProfile" {
+			t.Fatalf("takeover disabled still switched: %v", be.calls)
+		}
+	}
+}
+
 func TestExistingProfileIsSwitchedNotReenrolled(t *testing.T) {
 	be := &fakeBackend{
 		state:   ipn.Running,

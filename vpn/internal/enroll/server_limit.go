@@ -50,20 +50,44 @@ func parseTrusted(in []string) ([]netip.Prefix, error) {
 }
 
 // admit spends one global token and one per-IP token. It runs before the
-// bearer token is hashed. A closed bucket writes 429 and returns ok=false.
+// bearer token is hashed. A per-IP rejection puts the global token back, so
+// one client cannot empty the process budget with requests that were already
+// going to be refused. A closed bucket writes 429 and returns ok=false.
 func (s *Server) admit(w http.ResponseWriter, r *http.Request) (string, bool) {
 	remote := s.clientIP(r)
-	if !s.allowKeyed("pre:global", s.rate(func(c Config) int { return c.GlobalRatePerMinute }, defaultGlobalRatePerMinute)) {
+	globalRate := s.rate(func(c Config) int { return c.GlobalRatePerMinute }, defaultGlobalRatePerMinute)
+	ipRate := s.rate(func(c Config) int { return c.PerIPRatePerMinute }, defaultPerIPRatePerMinute)
+	if !s.allowKeyed("pre:global", globalRate) {
 		s.sampleWarn("rate limited", "scope", "global", "path", r.URL.Path, "remote", remote)
 		writeJSON(w, http.StatusTooManyRequests, map[string]string{"error": "rate limited"})
 		return remote, false
 	}
-	if !s.allowKeyed("pre:ip:"+remote, s.rate(func(c Config) int { return c.PerIPRatePerMinute }, defaultPerIPRatePerMinute)) {
+	if !s.allowKeyed("pre:ip:"+remote, ipRate) {
+		s.refundKeyed("pre:global", globalRate)
 		s.sampleWarn("rate limited", "scope", "ip", "path", r.URL.Path, "remote", remote)
 		writeJSON(w, http.StatusTooManyRequests, map[string]string{"error": "rate limited"})
 		return remote, false
 	}
 	return remote, true
+}
+
+// refundKeyed returns one token taken by allowKeyed. The global bucket is
+// still checked first, so a flood of new addresses cannot create per-IP
+// buckets faster than the process budget.
+func (s *Server) refundKeyed(key string, rate float64) {
+	if rate <= 0 {
+		rate = defaultTenantRate
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	b := s.buckets[key]
+	if b == nil {
+		return
+	}
+	b.tokens++
+	if b.tokens > rate {
+		b.tokens = rate
+	}
 }
 
 func (s *Server) rate(pick func(Config) int, fallback int) float64 {

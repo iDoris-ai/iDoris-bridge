@@ -23,6 +23,9 @@ type Host interface {
 	WriteFile(path string, data []byte, mode os.FileMode) error
 	MkdirAll(path string, mode os.FileMode) error
 	Stat(path string) (os.FileInfo, error)
+	// Lstat does not follow a symlink. Plan replay uses it so a link named
+	// like the approved token cannot stand in for another file.
+	Lstat(path string) (os.FileInfo, error)
 	Chmod(path string, mode os.FileMode) error
 	ReadFile(path string) ([]byte, error)
 	IsRoot() bool
@@ -41,6 +44,13 @@ type ApplyOptions struct {
 	// belongs to a different enrollment URL. Without it that case is an error,
 	// so one organisation's credential is never replaced by another's by accident.
 	ReplaceExisting bool
+	// Replay is set only by `gateway apply --plan`. That command reads a plan
+	// file the operator named. The file is not an enrollment confirmation:
+	// join, setup, and the local UI confirm the authority before they call
+	// Apply, and they leave Replay false. When Replay is set, Apply refuses
+	// a plan that would bind a token to an enroll URL or config path the
+	// existing config does not already own.
+	Replay bool
 }
 
 // ApplyResult is what the CLI and the local page show after Apply.
@@ -99,6 +109,11 @@ func Apply(plan Plan, host Host, opt ApplyOptions) (ApplyResult, error) {
 	}
 	if plan.ConfigPath == "" || plan.TokenFile == "" {
 		return ApplyResult{}, errors.New("gateway: plan is missing config_path or token_file")
+	}
+	if opt.Replay {
+		if err := CheckPlanReplay(plan, opt.PlanPath, host, opt.ReplaceExisting); err != nil {
+			return ApplyResult{}, err
+		}
 	}
 	existing, haveConfig, err := readExistingConfig(host, plan.ConfigPath)
 	if err != nil {
@@ -558,6 +573,13 @@ func otherThan(paths []string, selected string) []string {
 		}
 	}
 	return out
+}
+
+// CanonicalTokenPath is the path plan replay binds and the path apply must read.
+// A relative token_file is joined to the config directory. Reading the raw
+// relative string would open a different file in the process working directory.
+func CanonicalTokenPath(configPath, ref string) string {
+	return resolveTokenRef(configPath, ref)
 }
 
 func resolveTokenRef(configPath, ref string) string {

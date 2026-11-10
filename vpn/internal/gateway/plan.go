@@ -217,7 +217,8 @@ func gatewayPlan(req Request) (Plan, error) {
 }
 
 // LoadPlan reads a plan file. Unknown fields are rejected so a token cannot
-// hide in an extra key. The reader is capped at 1 MiB.
+// hide in an extra key. The reader is capped at 1 MiB. Loading a plan does
+// not establish authority: enroll_url and token_file are whatever the file says.
 func LoadPlan(r io.Reader) (Plan, error) {
 	dec := json.NewDecoder(io.LimitReader(r, 1<<20))
 	dec.DisallowUnknownFields()

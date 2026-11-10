@@ -762,6 +762,37 @@ func TestGatewayApplyRejectsCraftedAuthorityPlan(t *testing.T) {
 	}
 }
 
+func TestGatewayApplyReadsResolvedTokenNotWorkingDirectory(t *testing.T) {
+	const (
+		cfg      = "/home/acme/.idoris/vpn.json"
+		goodTok  = "/home/acme/.idoris/vpn.json.enroll-token"
+		planPath = "/home/acme/.idoris/gateway-plan.json"
+		relTok   = "vpn.json.enroll-token"
+	)
+	host := newFakeOS(false, "linux")
+	host.files[cfg] = []byte(`{"enroll_url":"https://enroll.good","enroll_token_file":"` + goodTok + `","hostname":"office-gw"}` + "\n")
+	host.modes[cfg] = 0o600
+	host.files[goodTok] = []byte(testToken + "\n")
+	host.modes[goodTok] = 0o600
+	host.files[relTok] = []byte("cwd-token-not-the-enrolled-one\n")
+	host.modes[relTok] = 0o600
+	host.files[planPath] = []byte(`{"role":"member","mode":"auto","accept_routes":true,"enroll_url":"https://enroll.good","token_file":"` + relTok + `","config_path":"` + cfg + `"}` + "\n")
+	host.modes[planPath] = 0o600
+	d := testDeps(host, "")
+	err := gatewayCmd([]string{"apply", "--plan", planPath, "--no-service"}, d)
+	if host.reads[relTok] != 0 {
+		t.Fatalf("read working-directory token %d times: %v", host.reads[relTok], err)
+	}
+	if host.reads[goodTok] == 0 {
+		t.Fatalf("did not read the enrolled token: %v", err)
+	}
+	for path, body := range host.files {
+		if bytes.Contains(body, []byte("cwd-token-not-the-enrolled-one")) && path != relTok {
+			t.Fatalf("working-directory token written to %s", path)
+		}
+	}
+}
+
 func TestGatewayApplyRejectsSymlinkPlanOnDisk(t *testing.T) {
 	dir := t.TempDir()
 	real := filepath.Join(dir, "real-plan.json")

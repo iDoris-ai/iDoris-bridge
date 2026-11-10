@@ -575,6 +575,13 @@ func otherThan(paths []string, selected string) []string {
 	return out
 }
 
+// CanonicalTokenPath is the path plan replay binds and the path apply must read.
+// A relative token_file is joined to the config directory. Reading the raw
+// relative string would open a different file in the process working directory.
+func CanonicalTokenPath(configPath, ref string) string {
+	return resolveTokenRef(configPath, ref)
+}
+
 func resolveTokenRef(configPath, ref string) string {
 	ref = strings.TrimSpace(ref)
 	if ref == "" {

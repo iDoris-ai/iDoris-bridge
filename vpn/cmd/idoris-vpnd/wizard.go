@@ -454,10 +454,13 @@ func (d *deps) applyCmd(args []string) error {
 	}
 	token := ""
 	if plan.TokenFile != "" {
-		if err := requireRegular(d.host, plan.TokenFile, "token file"); err != nil {
+		// CheckPlanReplay binds the resolved path. Read that file, not the
+		// raw relative token_file, or the working directory supplies the bytes.
+		tokenPath := gateway.CanonicalTokenPath(plan.ConfigPath, plan.TokenFile)
+		if err := requireRegular(d.host, tokenPath, "token file"); err != nil {
 			return err
 		}
-		b, err := d.host.ReadFile(plan.TokenFile)
+		b, err := d.host.ReadFile(tokenPath)
 		if err != nil {
 			return err
 		}

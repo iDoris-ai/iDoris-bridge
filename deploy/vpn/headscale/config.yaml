@@ -1,8 +1,11 @@
 # Headscale v0.29.x configuration for the iDoris VPN control plane.
 # Reference: https://headscale.net/stable/ref/configuration/
 # Replace vpn.example.org with your public hostname before first start.
+# bootstrap.sh refuses to run while this placeholder is still here.
 # server_url must be https on port 443 (no ":port"): Tailscale clients re-dial
 # the control server on 443, so the TLS proxy in front must serve it there.
+# A local lab can register once over plain HTTP; re-login after that still
+# needs this https:443 URL. See docs/14-VPN-OPERATIONS.md.
 
 server_url: https://vpn.example.org
 listen_addr: 0.0.0.0:8080
@@ -67,8 +70,9 @@ policy:
 
 dns:
   magic_dns: true
-  # Must differ from the server_url host. Members reach the Local AI host as
-  # e.g. local-ai.acme.idoris.internal
+  # Must differ from the server_url host. MagicDNS is
+  # <hostname>.<base_domain>, for example office-local-ai.idoris.internal.
+  # The organisation name is not part of the DNS name.
   base_domain: idoris.internal
   override_local_dns: false
   nameservers:

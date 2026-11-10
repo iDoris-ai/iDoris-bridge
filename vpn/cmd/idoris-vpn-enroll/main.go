@@ -9,6 +9,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"net/http"
@@ -29,9 +30,24 @@ func usage() {
 Usage:
   idoris-vpn-enroll serve  --config FILE [--listen 127.0.0.1:8787]
   idoris-vpn-enroll token  new                        print a new token and its hash
+  idoris-vpn-enroll invite --config FILE --entry NAME --enroll-url URL [--label L] [--hostname-hint H] [--allow-insecure]
+  idoris-vpn-enroll revoke --config FILE --entry NAME (--label L | --hash-prefix HEX) [--allow-empty]
+  idoris-vpn-enroll list-credentials --config FILE --entry NAME
   idoris-vpn-enroll tenant ensure --config FILE --name NAME   create the Headscale user, print its id
   idoris-vpn-enroll check  --config FILE              verify config and Headscale reachability
   idoris-vpn-enroll version
+
+serve reloads the config on SIGHUP. An invalid file keeps the previous config.
+A bad or empty headscale_api_key_file keeps the previous Headscale client.
+invite prints one join code to stdout and nothing else. The code contains the
+token; it is not written to the config file or the log.
+list-credentials prints the label, a hash prefix, and created_at. It never
+prints the token or the full hash.
+Expiring or deleting a Headscale node does not revoke enrollment: the daemon
+can ask for another pre-auth key. Revoke the credential first, then expire
+or delete the node. revoke refuses to remove the last credential unless
+--allow-empty is set. That leaves the entry with no credentials; it still
+loads, and every token is rejected.
 
 The Headscale API key is read from HEADSCALE_API_KEY or headscale_api_key_file.
 `, version.Version)
@@ -48,6 +64,12 @@ func main() {
 		err = serveCmd(os.Args[2:])
 	case "token":
 		err = tokenCmd(os.Args[2:])
+	case "invite":
+		err = inviteCmd(os.Args[2:], os.Stdout)
+	case "revoke":
+		err = revokeCmd(os.Args[2:], os.Stdout)
+	case "list-credentials":
+		err = listCredentialsCmd(os.Args[2:], os.Stdout)
 	case "tenant":
 		err = tenantCmd(os.Args[2:])
 	case "check":
@@ -70,7 +92,7 @@ func loadConfig(path string) (*enroll.Config, error) {
 	if path == "" {
 		return nil, errors.New("--config is required")
 	}
-	b, err := os.ReadFile(path)
+	b, err := enroll.ReadFileLocked(path)
 	if err != nil {
 		return nil, err
 	}
@@ -106,6 +128,18 @@ func apiKey(cfg *enroll.Config) (string, error) {
 	return "", errors.New("no Headscale API key: set HEADSCALE_API_KEY or headscale_api_key_file")
 }
 
+// controlProber adapts the Headscale client to enroll.ControlProber.
+// The two packages cannot share the interface: enroll already imports headscale.
+type controlProber struct{ c *headscale.Client }
+
+func (p controlProber) ProbeControl(ctx context.Context) (enroll.ControlProbe, error) {
+	st, err := p.c.ProbeControl(ctx)
+	if err != nil {
+		return enroll.ControlProbe{}, err
+	}
+	return enroll.ControlProbe{ExpiresAt: st.ExpiresAt, Known: st.Known}, nil
+}
+
 func hsClient(cfg *enroll.Config) (*headscale.Client, error) {
 	k, err := apiKey(cfg)
 	if err != nil {
@@ -134,6 +168,7 @@ func serveCmd(args []string) error {
 	if err != nil {
 		return err
 	}
+	srv.SetControlProber(controlProber{hs})
 	ln, err := net.Listen("tcp", *listen)
 	if err != nil {
 		return err
@@ -141,6 +176,16 @@ func serveCmd(args []string) error {
 	hsrv := &http.Server{Handler: srv.Handler(), ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 15 * time.Second, WriteTimeout: 30 * time.Second}
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+	hup := make(chan os.Signal, 1)
+	notifyReload(hup)
+	defer signal.Stop(hup)
+	go func() {
+		for range hup {
+			if err := reloadFromDisk(srv, *configPath, log); err != nil {
+				log.Error("config reload rejected; keeping the previous config", "err", err)
+			}
+		}
+	}()
 	go func() {
 		<-ctx.Done()
 		sctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -152,6 +197,155 @@ func serveCmd(args []string) error {
 		return err
 	}
 	return nil
+}
+
+// reloadFromDisk reads the file again, reapplies environment overrides, and
+// swaps the tenant config only when the result validates. When the file names
+// headscale_api_key_file and HEADSCALE_API_KEY is unset, it also probes that
+// key and swaps the client. A bad or empty key keeps the client already
+// serving and is logged without the key. The caller must not treat that as a
+// rejected reload: the tenant config has already been swapped.
+func reloadFromDisk(srv *enroll.Server, path string, log *slog.Logger) error {
+	cfg, err := loadConfig(path)
+	if err != nil {
+		return err
+	}
+	if err := srv.Reload(*cfg); err != nil {
+		return err
+	}
+	reloadHeadscaleKey(srv, cfg, log)
+	logConfigReload(log, path, cfg)
+	return nil
+}
+
+// logConfigReload records the file identity and how many credentials the
+// reload actually installed. Size and mtime show whether a bind-mounted
+// single file was the new one. The token values are not logged.
+func logConfigReload(log *slog.Logger, path string, cfg *enroll.Config) {
+	if log == nil || cfg == nil {
+		return
+	}
+	st, err := os.Stat(path)
+	if err != nil {
+		log.Info("config reloaded", "err", err)
+		return
+	}
+	n := 0
+	for _, tenant := range cfg.Tenants {
+		n += len(tenant.TokenHashes)
+	}
+	log.Info("config reloaded",
+		"size", st.Size(),
+		"mtime", st.ModTime().UTC().Format(time.RFC3339Nano),
+		"credentials", n,
+	)
+}
+
+func reloadHeadscaleKey(srv *enroll.Server, cfg *enroll.Config, log *slog.Logger) {
+	if log == nil {
+		log = slog.New(slog.NewTextHandler(io.Discard, nil))
+	}
+	if os.Getenv("HEADSCALE_API_KEY") != "" {
+		return
+	}
+	path := strings.TrimSpace(cfg.HeadscaleAPIKeyFile)
+	if path == "" {
+		return
+	}
+	b, err := os.ReadFile(path) //nolint:gosec // G304: the path is the operator's headscale_api_key_file
+	if err != nil {
+		log.Warn("headscale api key file unreadable; keeping the previous client", "path", path, "err", err)
+		return
+	}
+	key := strings.TrimSpace(string(b))
+	if key == "" {
+		log.Warn("headscale api key file is empty; keeping the previous client", "path", path)
+		return
+	}
+	hs := &headscale.Client{BaseURL: cfg.HeadscaleURL, APIKey: key}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if _, err := hs.ProbeControl(ctx); err != nil {
+		var ae *headscale.APIError
+		if errors.As(err, &ae) {
+			log.Warn("headscale api key probe failed; keeping the previous client", "status", ae.Status)
+			return
+		}
+		log.Warn("headscale api key probe failed; keeping the previous client")
+		return
+	}
+	srv.SetMinter(hs)
+	srv.SetControlProber(controlProber{hs})
+	log.Info("headscale api key reloaded", "path", path)
+}
+
+func inviteCmd(args []string, stdout io.Writer) error {
+	fs := flag.NewFlagSet("invite", flag.ContinueOnError)
+	configPath := fs.String("config", "", "JSON config")
+	entry := fs.String("entry", "", "tenant entry name")
+	hint := fs.String("hostname-hint", "", "optional hostname stored in the join code")
+	label := fs.String("label", "", "credential label (default: hostname hint, else cred-<hash prefix>)")
+	enrollURL := fs.String("enroll-url", "", "enrollment service URL stored in the join code")
+	allow := fs.Bool("allow-insecure", false, "allow an http:// enroll URL (labs only)")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if *entry == "" || *enrollURL == "" {
+		return errors.New("--entry and --enroll-url are required")
+	}
+	code, err := enroll.Invite(*configPath, *entry, *hint, *enrollURL, *label, *allow)
+	if err != nil {
+		return err
+	}
+	_, err = fmt.Fprintln(stdout, code)
+	return err
+}
+
+func revokeCmd(args []string, stdout io.Writer) error {
+	fs := flag.NewFlagSet("revoke", flag.ContinueOnError)
+	configPath := fs.String("config", "", "JSON config")
+	entry := fs.String("entry", "", "tenant entry name")
+	label := fs.String("label", "", "credential label to remove")
+	prefix := fs.String("hash-prefix", "", "hex prefix of the token hash to remove")
+	allowEmpty := fs.Bool("allow-empty", false, "remove the last credential and leave the entry with none")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if *entry == "" {
+		return errors.New("--entry is required")
+	}
+	if (*label == "") == (*prefix == "") {
+		return errors.New("provide exactly one of --label or --hash-prefix")
+	}
+	removed, err := enroll.RemoveCredential(*configPath, *entry, enroll.CredentialMatch{Label: *label, HashPrefix: *prefix, AllowEmpty: *allowEmpty})
+	if err != nil {
+		return err
+	}
+	shown := removed.Label
+	if shown == "" {
+		shown = "-"
+	}
+	// HashPrefix only. The full hash and the token stay out of the terminal.
+	_, err = fmt.Fprintf(stdout, "revoked %s %s %s\n", *entry, shown, enroll.HashPrefix(removed.Hash))
+	return err
+}
+
+func listCredentialsCmd(args []string, stdout io.Writer) error {
+	fs := flag.NewFlagSet("list-credentials", flag.ContinueOnError)
+	configPath := fs.String("config", "", "JSON config")
+	entry := fs.String("entry", "", "tenant entry name")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if *entry == "" {
+		return errors.New("--entry is required")
+	}
+	creds, err := enroll.ListCredentials(*configPath, *entry)
+	if err != nil {
+		return err
+	}
+	_, err = io.WriteString(stdout, enroll.FormatCredentialList(creds))
+	return err
 }
 
 func tokenCmd(args []string) error {

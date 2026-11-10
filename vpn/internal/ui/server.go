@@ -299,23 +299,33 @@ func (s *Server) routes() http.Handler {
 }
 
 func (s *Server) authorized(r *http.Request) bool {
-	ok := true
-	presented := false
-	check := func(v string) {
-		if v == "" {
-			return
-		}
-		presented = true
-		if subtle.ConstantTimeCompare([]byte(v), []byte(s.secret)) != 1 {
-			ok = false
-		}
-	}
-	check(r.URL.Query().Get("k"))
+	k := r.URL.Query().Get("k")
+	header := r.Header.Get(secretHeader)
+	cookie := ""
 	if c, err := r.Cookie(cookieName); err == nil {
-		check(c.Value)
+		cookie = c.Value
 	}
-	check(r.Header.Get(secretHeader))
-	return presented && ok
+	match := func(v string) bool {
+		return v != "" && subtle.ConstantTimeCompare([]byte(v), []byte(s.secret)) == 1
+	}
+	kOK := match(k)
+	cookieOK := match(cookie)
+	headerOK := match(header)
+	// A fresh launch link is the new secret. A cookie left by the previous
+	// process must not veto it, or the browser stays locked out of the page.
+	if kOK {
+		return true
+	}
+	if k != "" || (cookie == "" && header == "") {
+		return false
+	}
+	if cookie != "" && !cookieOK {
+		return false
+	}
+	if header != "" && !headerOK {
+		return false
+	}
+	return true
 }
 
 func sameOrigin(r *http.Request, bound string) bool {

@@ -44,9 +44,10 @@ func LoadFile(path string) (*Config, error) {
 }
 
 // ReadFileLocked reads the config under the same lock Invite and Revoke hold.
-// SIGHUP must use this. os.ReadFile can observe the empty inode between
-// O_TRUNC and the following Write, and a rejected reload would keep a token
-// that a concurrent Revoke already removed.
+// os.ReadFile can observe the empty inode between O_TRUNC and the following
+// Write. SIGHUP must use WithLockedRead: the lock has to cover the in-memory
+// Reload as well as the read, or a Revoke in that gap stays on disk and is
+// then overwritten in the serving process.
 func ReadFileLocked(path string) ([]byte, error) {
 	var b []byte
 	err := withFileLock(path, func() error {
@@ -61,6 +62,26 @@ func ReadFileLocked(path string) ([]byte, error) {
 		return readConfigUnlocked(path)
 	}
 	return b, err
+}
+
+// WithLockedRead calls fn with the config bytes while Invite and Revoke still
+// cannot write. fn must validate and publish those bytes before it returns.
+func WithLockedRead(path string, fn func([]byte) error) error {
+	err := withFileLock(path, func() error {
+		b, err := readConfigBytes(path)
+		if err != nil {
+			return err
+		}
+		return fn(b)
+	})
+	if err != nil && lockOpenDenied(err) {
+		b, rerr := readConfigUnlocked(path)
+		if rerr != nil {
+			return rerr
+		}
+		return fn(b)
+	}
+	return err
 }
 
 // readConfigUnlocked reads the canonical file and does not write it.

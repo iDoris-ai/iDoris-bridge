@@ -52,6 +52,49 @@ func configInode(t *testing.T, path string) uint64 {
 	return sys.Ino
 }
 
+func TestWithLockedReadHoldsLockThroughApply(t *testing.T) {
+	path := writeHashes(t, 0o640, []string{HashToken("seed-token")})
+	started := make(chan struct{})
+	release := make(chan struct{})
+	errc := make(chan error, 1)
+	go func() {
+		errc <- WithLockedRead(path, func(b []byte) error {
+			if len(b) == 0 {
+				return errors.New("empty")
+			}
+			close(started)
+			<-release
+			return nil
+		})
+	}()
+	select {
+	case <-started:
+	case err := <-errc:
+		t.Fatal(err)
+	case <-time.After(2 * time.Second):
+		t.Fatal("apply did not start")
+	}
+	done := make(chan struct{})
+	go func() {
+		_ = withFileLock(path, func() error { return nil })
+		close(done)
+	}()
+	select {
+	case <-done:
+		t.Fatal("file lock was free while apply was still running")
+	case <-time.After(150 * time.Millisecond):
+	}
+	close(release)
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("lock was not released after apply")
+	}
+	if err := <-errc; err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestInviteRoundTripKeepsInodeModeAndBak(t *testing.T) {
 	path := writeHashes(t, 0o640, []string{HashToken("seed-token")})
 	original, err := os.ReadFile(path)

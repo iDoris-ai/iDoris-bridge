@@ -85,6 +85,10 @@ func loadConfig(path string) (*enroll.Config, error) {
 	if err != nil {
 		return nil, err
 	}
+	return configFromBytes(path, b)
+}
+
+func configFromBytes(path string, b []byte) (*enroll.Config, error) {
 	var cfg enroll.Config
 	dec := json.NewDecoder(strings.NewReader(string(b)))
 	dec.DisallowUnknownFields()
@@ -178,13 +182,16 @@ func serveCmd(args []string) error {
 }
 
 // reloadFromDisk reads the file again, reapplies environment overrides, and
-// swaps the server only when the result validates.
+// swaps the server only when the result validates. The file lock stays held
+// through Reload so a Revoke cannot land between the read and the publish.
 func reloadFromDisk(srv *enroll.Server, path string) error {
-	cfg, err := loadConfig(path)
-	if err != nil {
-		return err
-	}
-	return srv.Reload(*cfg)
+	return enroll.WithLockedRead(path, func(b []byte) error {
+		cfg, err := configFromBytes(path, b)
+		if err != nil {
+			return err
+		}
+		return srv.Reload(*cfg)
+	})
 }
 
 func inviteCmd(args []string, stdout io.Writer) error {

@@ -158,25 +158,53 @@ def parse_dotenv(text: str) -> dict:
     return out
 
 
+def _is_tailscaled_state(name: str) -> bool:
+    # tar -T records the find path: "./tailscaled.state" or
+    # "./sub/tailscaled.state". Strip one leading "./" prefix. Do not use
+    # str.lstrip("./"): that character set also accepts ".tailscaled.state"
+    # and "./..tailscaled.state". The rollback checksum in ops-lib.sh uses
+    # the same one-prefix rule.
+    key = name.replace("\\", "/")
+    if key.startswith("./"):
+        key = key[2:]
+    return key == "tailscaled.state" or key.endswith("/tailscaled.state")
+
+
 def validate_tar(path: str) -> None:
+    """Check one sidecar identity archive.
+
+    A backup with no sidecar file is the supported no-sidecar case, and a
+    volume with no regular tailscaled.state is not archived at all. When
+    this file exists it claims to be that identity, so a regular member
+    named tailscaled.state is mandatory. A directory, a symlink, or a
+    lookalike such as tailscaled.state.bak does not count.
+    """
     if os.path.islink(path) or not os.path.isfile(path):
         die("sidecar state must be a regular file")
     try:
         tf = tarfile.open(path, "r:*")
     except (tarfile.TarError, OSError) as exc:
         die("sidecar state is not a tar archive: %s" % exc)
-    with tf:
-        for member in tf.getmembers():
-            name = member.name
-            if name.startswith("/") or name.startswith("\\") or os.path.isabs(name):
-                die("sidecar tar has an absolute member")
-            parts = name.replace("\\", "/").split("/")
-            if any(part in ("", "..") for part in parts):
-                die("sidecar tar member escapes: %s" % name)
-            if member.issym() or member.islnk() or member.isdev() or member.isfifo():
-                die("sidecar tar member is not a regular file: %s" % name)
-            if not (member.isfile() or member.isdir()):
-                die("sidecar tar member is not a regular file: %s" % name)
+    found = False
+    try:
+        with tf:
+            for member in tf.getmembers():
+                name = member.name
+                if name.startswith("/") or name.startswith("\\") or os.path.isabs(name):
+                    die("sidecar tar has an absolute member")
+                parts = name.replace("\\", "/").split("/")
+                if any(part in ("", "..") for part in parts):
+                    die("sidecar tar member escapes: %s" % name)
+                if member.issym() or member.islnk() or member.isdev() or member.isfifo():
+                    die("sidecar tar member is not a regular file: %s" % name)
+                if not (member.isfile() or member.isdir()):
+                    die("sidecar tar member is not a regular file: %s" % name)
+                if member.isfile() and _is_tailscaled_state(name):
+                    found = True
+    except (tarfile.TarError, OSError) as exc:
+        die("sidecar state is not a tar archive: %s" % exc)
+    if not found:
+        die("sidecar archive has no regular tailscaled.state")
 
 
 def validate_tree(root: str) -> dict:
@@ -237,8 +265,11 @@ def validate_tree(root: str) -> dict:
 
 
 def main() -> None:
-    if len(sys.argv) != 3 or sys.argv[1] not in ("tree", "dotenv"):
-        die("usage: bundle.py tree DIR | dotenv FILE")
+    if len(sys.argv) != 3 or sys.argv[1] not in ("tree", "dotenv", "sidecar-tar"):
+        die("usage: bundle.py tree DIR | dotenv FILE | sidecar-tar FILE")
+    if sys.argv[1] == "sidecar-tar":
+        validate_tar(sys.argv[2])
+        return
     if sys.argv[1] == "tree":
         info = validate_tree(sys.argv[2])
     else:

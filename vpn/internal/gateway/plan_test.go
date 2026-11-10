@@ -195,6 +195,19 @@ func TestApplyIdempotentRootAndNonRoot(t *testing.T) {
 	}
 }
 
+func TestSudoApplyCommandUsesShellSingleQuotes(t *testing.T) {
+	got := SudoApplyCommand(`/tmp/plan$(id).json`)
+	want := `sudo idoris-vpnd gateway apply --plan '/tmp/plan$(id).json'`
+	if got != want {
+		t.Fatalf("%s", got)
+	}
+	got = SudoApplyCommand(`/tmp/o'plan.json`)
+	want = `sudo idoris-vpnd gateway apply --plan '/tmp/o'"'"'plan.json'`
+	if got != want {
+		t.Fatalf("%s", got)
+	}
+}
+
 func TestApplyBlockedAndMissingToken(t *testing.T) {
 	p := Plan{Blocked: true, BlockReason: "Linux only", ConfigPath: "/c", TokenFile: "/t"}
 	if _, err := Apply(p, newMemHost(true, "linux"), ApplyOptions{Token: "t"}); err == nil {

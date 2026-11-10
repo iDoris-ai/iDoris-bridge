@@ -7,7 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strconv"
+	"strings"
 
 	"github.com/iDoris-ai/iDoris-bridge/vpn/internal/join"
 )
@@ -44,9 +44,14 @@ type ApplyResult struct {
 }
 
 // SudoApplyCommand is the exact command a non-root gateway prints.
-// It never includes the enrollment token.
+// It never includes the enrollment token. The path is single-quoted for a
+// POSIX shell, so $() and backticks in the path are not expanded.
 func SudoApplyCommand(planPath string) string {
-	return "sudo idoris-vpnd gateway apply --plan " + strconv.Quote(planPath)
+	return "sudo idoris-vpnd gateway apply --plan " + shellQuote(planPath)
+}
+
+func shellQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", `'"'"'`) + "'"
 }
 
 // Apply writes the daemon config and, on a Linux gateway running as root,

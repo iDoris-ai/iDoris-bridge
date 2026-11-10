@@ -48,11 +48,11 @@ type ModeDecision struct {
 // requested is auto, system, or embedded. takeoverExplicit is true only when
 // the operator set takeover to true (the default is false and is not explicit).
 //
-// auto uses system only when that cannot hijack a foreign tailnet: tailscaled
-// is reachable and it is not logged in, already on our control URL, or already
-// has an iDoris profile. A foreign control URL uses system only when takeover
-// was explicitly enabled. Otherwise auto uses embedded, including when
-// tailscaled is not reachable.
+// auto uses system when tailscaled is reachable and it is not logged in,
+// already on our control URL, or has an iDoris profile that is not currently
+// running a foreign tailnet. A running foreign control URL uses system only
+// when takeover was explicitly enabled, even if an iDoris profile also exists.
+// Otherwise auto uses embedded, including when tailscaled is not reachable.
 func DecideMode(requested string, takeoverExplicit bool, view SystemView, ourControl string) (ModeDecision, error) {
 	switch requested {
 	case "", ModeAuto:
@@ -70,6 +70,20 @@ func DecideMode(requested string, takeoverExplicit bool, view SystemView, ourCon
 		return ModeDecision{Mode: ModeSystem, Reason: "system tailscaled is already on the iDoris control server"}, nil
 	}
 	if view.HasOurProfile {
+		// A leftover iDoris profile must not pull auto onto system while a
+		// foreign tailnet is Running and takeover was not requested. That
+		// choice makes stepForeign report PhaseBlocked and never falls back
+		// to embedded. A stopped or logged-out foreign profile can still use
+		// system, because switching it does not drop a live session.
+		if takeoverExplicit {
+			return ModeDecision{Mode: ModeSystem, Reason: "takeover explicitly enabled"}, nil
+		}
+		if view.BackendState == ipn.Running.String() && foreignControl(view.ControlURL, ourControl) {
+			return ModeDecision{
+				Mode:   ModeEmbedded,
+				Reason: "system tailscaled is logged into a foreign control server and takeover is not enabled",
+			}, nil
+		}
 		return ModeDecision{Mode: ModeSystem, Reason: "system tailscaled has an iDoris profile"}, nil
 	}
 	if !foreignControl(view.ControlURL, ourControl) {

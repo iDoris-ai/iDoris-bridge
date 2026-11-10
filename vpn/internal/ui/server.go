@@ -87,6 +87,10 @@ type Server struct {
 	report *netdetect.Report
 	plan   *gateway.Plan
 	paths  idorisPaths
+	// joinGen advances every time a new code replaces s.join. planGen is the
+	// generation that built s.plan. Apply refuses a plan from an older code.
+	joinGen uint64
+	planGen uint64
 
 	served   chan struct{}
 	serveErr error
@@ -414,6 +418,8 @@ func (s *Server) handleJoin(w http.ResponseWriter, r *http.Request) {
 	s.mu.Lock()
 	s.join = &held
 	s.paths = paths
+	s.plan = nil
+	s.joinGen++
 	s.mu.Unlock()
 	writeJSON(w, http.StatusOK, view)
 }
@@ -466,6 +472,7 @@ func (s *Server) handlePlan(w http.ResponseWriter, r *http.Request) {
 	held := s.join
 	rep := s.report
 	paths := s.paths
+	gen := s.joinGen
 	s.mu.Unlock()
 	if held == nil {
 		writeErr(w, http.StatusBadRequest, "paste a join code first")
@@ -505,7 +512,13 @@ func (s *Server) handlePlan(w http.ResponseWriter, r *http.Request) {
 	plan.TokenFile = paths.token
 	plan.ConfigPath = paths.config
 	s.mu.Lock()
+	if s.joinGen != gen {
+		s.mu.Unlock()
+		writeErr(w, http.StatusConflict, "join code changed; build the plan again")
+		return
+	}
 	s.plan = &plan
+	s.planGen = gen
 	s.paths = paths
 	s.mu.Unlock()
 	writeJSON(w, http.StatusOK, plan)
@@ -516,11 +529,12 @@ func (s *Server) handleApply(w http.ResponseWriter, _ *http.Request) {
 	held := s.join
 	plan := s.plan
 	paths := s.paths
-	s.mu.Unlock()
-	if held == nil || plan == nil {
+	if held == nil || plan == nil || s.planGen != s.joinGen {
+		s.mu.Unlock()
 		writeErr(w, http.StatusBadRequest, "build a plan first")
 		return
 	}
+	s.mu.Unlock()
 	if plan.Blocked {
 		writeErr(w, http.StatusConflict, plan.BlockReason)
 		return

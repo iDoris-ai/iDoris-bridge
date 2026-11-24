@@ -1,0 +1,21 @@
+name: bridge-protocol-ci
+on:
+  push:
+    branches: [main]
+    paths: ["Cargo.toml", "Cargo.lock", "crates/bridge-protocol/**", ".github/workflows/bridge-protocol-ci.yml"]
+  pull_request:
+    paths: ["Cargo.toml", "Cargo.lock", "crates/bridge-protocol/**", ".github/workflows/bridge-protocol-ci.yml"]
+
+permissions:
+  contents: read
+
+jobs:
+  protocol:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: Install Rust 1.95.0
+        run: rustup toolchain install 1.95.0 --profile minimal --component rustfmt --component clippy
+      - run: cargo +1.95.0 fmt --all -- --check
+      - run: cargo +1.95.0 clippy --locked --workspace --all-targets -- -D warnings
+      - run: cargo +1.95.0 test --locked --workspace

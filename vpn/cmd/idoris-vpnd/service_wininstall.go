@@ -91,19 +91,23 @@ func replaceWindowsTask(spec windowsReplaceSpec) error {
 	if err := os.Mkdir(stage, 0o750); err != nil {
 		return err
 	}
-	// Windows ignores the 0750 mode. The inherited ProgramData ACL would
-	// let another local user read credential bytes, so the empty directory
-	// is restricted and verified before any file is copied in. Per-file
-	// ACLs are applied again once the staged files exist.
-	if err := protectWindowsInstallFn(stage, "", "", "", nil); err != nil {
-		return err
-	}
 	commit := false
 	defer func() {
 		if !commit {
 			_ = os.RemoveAll(stage)
 		}
 	}()
+	// Windows ignores the 0750 mode. The inherited ProgramData ACL can let
+	// another local user create files until icacls finishes, so the empty
+	// directory is restricted first. The directory must still be empty after
+	// that returns: a file created during the ACL calls is not overwritten.
+	// This check does not, by itself, describe the resulting Windows DACL.
+	if err := protectWindowsInstallFn(stage, "", "", "", nil); err != nil {
+		return err
+	}
+	if err := requireEmptyInstallDir(stage); err != nil {
+		return err
+	}
 
 	runExe := spec.LiveExe
 	stagedName := filepath.Base(spec.LiveExe)
@@ -128,7 +132,7 @@ func replaceWindowsTask(spec windowsReplaceSpec) error {
 		return err
 	}
 	stagedConfig := filepath.Join(stage, "vpn.json")
-	if err := os.WriteFile(stagedConfig, body, 0o600); err != nil { //nolint:gosec // G306: staged config is mode 0600 before it is moved onto the live path
+	if err := writeStagedInstallFile(stagedConfig, body, 0o600); err != nil {
 		return err
 	}
 	// Secrets exist only in the staging directory. Protect that directory
@@ -192,6 +196,17 @@ func replaceWindowsTask(spec windowsReplaceSpec) error {
 	}
 	commit = true
 	_ = os.RemoveAll(stage)
+	return nil
+}
+
+func requireEmptyInstallDir(path string) error {
+	entries, err := os.ReadDir(path)
+	if err != nil {
+		return err
+	}
+	if len(entries) != 0 {
+		return fmt.Errorf("windows install: staging directory %s is not empty", path)
+	}
 	return nil
 }
 

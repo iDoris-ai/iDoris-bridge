@@ -41,7 +41,8 @@ advanced option; the product default is a single organisation.
 --lan-cidr CIDR   (repeatable) subnet-router block for that organisation:
                   tag:<org>-gateway, an enrollment entry, autoApprovers for
                   the prefix, and an ACL from <org>@ to the prefix on
-                  8740, 8742, 443 and 11434. A prefix cannot be shared.
+                  8740, 8742, 443 and 11434. Cross-tenant prefixes cannot
+                  overlap; tailnet and unsuitable LAN ranges are rejected.
 
 --tailnet-admin   enrollment entry "vpn-server" (tag:vpn-server) for the
                   compose profile tailnet-admin. See docs/14-VPN-OPERATIONS.md.
@@ -141,7 +142,7 @@ if [[ ! -s headplane/cookie_secret ]]; then
 fi
 [[ "$(wc -c < headplane/cookie_secret | tr -d ' ')" == 32 ]] || die "headplane/cookie_secret must be exactly 32 bytes"
 
-policy_args=(python3 "$here/policy.py" "$cmd" --policy "$here/headscale/policy.hujson" --state "$here/headscale/managed.json" --admin "$admin")
+policy_args=(python3 "$here/policy.py" "$cmd" --policy "$here/headscale/policy.hujson" --headscale-config "$here/headscale/config.yaml" --state "$here/headscale/managed.json" --admin "$admin")
 if [[ -n "$org" ]]; then
   policy_args+=(--org "$org")
 fi

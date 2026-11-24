@@ -59,7 +59,7 @@ bash deploy/vpn/bootstrap.sh add-tenant globex
 bash deploy/vpn/bootstrap.sh add-tenant globex --lan-cidr 192.168.50.0/24
 ```
 
-`--lan-cidr` 可以重复。同一条前缀不能属于两个组织，脚本会拒绝。需要更硬的边界时，另起一套 `deploy/vpn`，不要靠这一份策略文件。
+`--lan-cidr` 可以重复。不同组织的前缀不能重叠（包括一段包含另一段），脚本会拒绝；同一组织可以重复添加或使用重叠前缀。需要更硬的边界时，另起一套 `deploy/vpn`，不要靠这一份策略文件。
 
 ## 4. 在服务器上操作：`ctl.sh`
 
@@ -157,7 +157,11 @@ bash deploy/vpn/bootstrap.sh init --org office --lan-cidr 192.168.1.0/24
 
 反向只允许 `tag:<组织>-gateway` → `<组织>@:*`，也就是网关这台机器访问自己的成员。不要把局域网前缀写成源：Tailscale 对子网流量默认做 SNAT，回包已经来自网关节点自己的地址；把整段局域网写成源，会让该网段里任意主机主动连成员。
 
-Headscale v0.29 的 `autoApprovers.routes` 是「前缀 → 批准者列表」。空对象合法，表示不自动批准，那时用 `ctl.sh routes approve`。本机 `headscale policy check` 对空对象、对 `10.88.88.0/24`、对 `192.168.50.0/24` 都返回 `Policy is valid`。`0.0.0.0/0` 不会被自动批准。
+Headscale v0.29 的 `autoApprovers.routes` 是「前缀 → 批准者列表」。空对象合法，表示不自动批准，那时用 `ctl.sh routes approve`。本机 `headscale policy check` 对空对象、对 `10.88.88.0/24`、对 `192.168.50.0/24` 都返回 `Policy is valid`。
+
+`--lan-cidr` 只接受严格的 IPv4 网络地址。脚本拒绝 `0.0.0.0/0`、与 `deploy/vpn/headscale/config.yaml` 的 `prefixes.v4` 重叠的网络，以及与以下任一范围重叠的网络：`0.0.0.0/8`、`100.64.0.0/10`、`127.0.0.0/8`、`169.254.0.0/16`、`224.0.0.0/4`、`240.0.0.0/4`。即使改了 Headscale 的 `prefixes.v4`，`100.64.0.0/10` 仍不能作为 LAN 前缀。重新运行时也检查已保存的前缀。
+
+读取 Headscale 地址范围时，只支持当前仓库中的配置形态：顶层 `prefixes:` 块，下面恰好一个缩进的 `v4: IPv4/CIDR` 字面量标量（可加单引号或双引号）。重复键、内联映射、环境变量或其他无法明确读取的写法会被拒绝；调整配置形态时需同步更新校验器。
 
 网关主机：
 

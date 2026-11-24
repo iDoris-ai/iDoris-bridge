@@ -38,6 +38,13 @@ LOCAL_AI_PORTS = (
 # Ports a member may open on the office LAN through the subnet router.
 # 11434 is Ollama's default listen port, for a LAN box that does not run Tailscale.
 LAN_PORTS = LOCAL_AI_PORTS + ((11434, "Ollama on the LAN host"),)
+UNSUITABLE_LAN_V4 = tuple(
+    ipaddress.IPv4Network(cidr)
+    for cidr in (
+        "0.0.0.0/8", "100.64.0.0/10", "127.0.0.0/8",
+        "169.254.0.0/16", "224.0.0.0/4", "240.0.0.0/4",
+    )
+)
 
 
 def die(message: str) -> None:
@@ -53,7 +60,46 @@ def valid_name(name: str, what: str) -> str:
     return name
 
 
-def parse_cidr(text: str) -> str:
+def tailnet_v4(config_path: Path) -> ipaddress.IPv4Network:
+    try:
+        lines = config_path.read_text().splitlines()
+    except OSError as exc:
+        die(f"cannot read Headscale config {config_path}: {exc}")
+    # Read only the simple block mapping used by this deployment. If its
+    # meaning is ambiguous, do not guess the tunnel range.
+    blocks = [i for i, line in enumerate(lines) if re.match(r"^prefixes\s*:", line)]
+    shape = "expected a top-level 'prefixes:' block with one indented 'v4: IPv4/CIDR' scalar"
+    if len(blocks) != 1 or not re.fullmatch(r"prefixes:[ ]*(?:#.*)?", lines[blocks[0]]):
+        die(f"unsupported Headscale config {config_path}: {shape} (found {len(blocks)} blocks)")
+    child_indent = None
+    values = []
+    for line in lines[blocks[0] + 1:]:
+        if not line.strip() or line.lstrip().startswith("#"):
+            continue
+        if not line.startswith(" "):
+            break
+        match = re.fullmatch(r"( +)([a-zA-Z0-9_]+):[ ]*(.*)", line)
+        if not match:
+            die(f"unsupported Headscale prefixes block in {config_path}: {shape}")
+        indent, key, value = match.groups()
+        if child_indent is None:
+            child_indent = len(indent)
+        if len(indent) != child_indent:
+            die(f"unsupported Headscale prefixes block in {config_path}: inconsistent indentation")
+        if key == "v4":
+            values.append(value)
+    if len(values) != 1:
+        die(f"unsupported Headscale config {config_path}: {shape} (found {len(values)} v4 values)")
+    match = re.fullmatch(r'''(?:([0-9./]+)|"([0-9./]+)"|'([0-9./]+)')[ ]*(?:#.*)?''', values[0])
+    if not match:
+        die(f"unsupported Headscale prefixes.v4 in {config_path}: expected a literal IPv4/CIDR scalar")
+    try:
+        return ipaddress.IPv4Network(next(value for value in match.groups() if value), strict=True)
+    except ValueError as exc:
+        die(f"invalid Headscale prefixes.v4 in {config_path}: {exc}")
+
+
+def parse_cidr(text: str, tailnet: ipaddress.IPv4Network) -> str:
     try:
         net = ipaddress.ip_network(text, strict=True)
     except ValueError as exc:
@@ -62,6 +108,11 @@ def parse_cidr(text: str) -> str:
         die(f"LAN CIDR '{text}' must be IPv4")
     if net.prefixlen == 0:
         die(f"LAN CIDR '{text}' is an exit-node route; this deployment does not auto-approve it")
+    if net.overlaps(tailnet):
+        die(f"LAN CIDR '{text}' overlaps Headscale tailnet {tailnet}")
+    for reserved in UNSUITABLE_LAN_V4:
+        if net.overlaps(reserved):
+            die(f"LAN CIDR '{text}' overlaps unsuitable LAN network {reserved}")
     return str(net)
 
 
@@ -136,22 +187,27 @@ def org_by_name(state: dict, name: str) -> dict | None:
     return None
 
 
+def validate_state_cidrs(state: dict, tailnet: ipaddress.IPv4Network) -> None:
+    owned: list[tuple[ipaddress.IPv4Network, str]] = []
+    for org in state["orgs"]:
+        for cidr in org["lan_cidrs"]:
+            network = ipaddress.IPv4Network(parse_cidr(cidr, tailnet))
+            for other, owner in owned:
+                if owner != org["name"] and network.overlaps(other):
+                    die(
+                        f"LAN CIDR {cidr} for '{org['name']}' overlaps {other} for '{owner}'. "
+                        "Organisations need distinct, non-overlapping LAN prefixes."
+                    )
+            owned.append((network, org["name"]))
+
+
 def merge_cidrs(state: dict, org_name: str, cidrs: list[str]) -> None:
     org = org_by_name(state, org_name)
     if org is None:
         die(f"internal: org '{org_name}' missing while merging CIDRs")
-    owned = {c: o["name"] for o in state["orgs"] for c in o["lan_cidrs"]}
     for cidr in cidrs:
-        owner = owned.get(cidr)
-        if owner is not None and owner != org_name:
-            die(
-                f"LAN CIDR {cidr} is already auto-approved for '{owner}'. "
-                "Two organisations cannot share a prefix on one Headscale; "
-                "use a distinct prefix or a separate deploy/vpn stack."
-            )
         if cidr not in org["lan_cidrs"]:
             org["lan_cidrs"].append(cidr)
-            owned[cidr] = org_name
 
 
 def apply_command(state: dict, args: argparse.Namespace, fresh_file: bool, policy_text: str) -> None:
@@ -283,6 +339,8 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Render idoris-managed Headscale policy regions.")
     parser.add_argument("command", choices=("init", "add-tenant"))
     parser.add_argument("--policy", required=True, type=Path)
+    parser.add_argument("--headscale-config", type=Path,
+                        help="Headscale config.yaml to read prefixes.v4 from (default: beside --policy)")
     parser.add_argument("--state", required=True, type=Path)
     parser.add_argument("--org", default="")
     parser.add_argument("--admin", default=DEFAULT_ADMIN)
@@ -293,12 +351,14 @@ def main() -> None:
         valid_name(args.admin, "admin user")
     if args.org:
         valid_name(args.org, "organisation")
-    args.lan_cidr = [parse_cidr(c) for c in args.lan_cidr]
-
     policy_path = args.policy
+    tailnet = tailnet_v4(args.headscale_config or policy_path.with_name("config.yaml"))
+    args.lan_cidr = [parse_cidr(c, tailnet) for c in args.lan_cidr]
     text = policy_path.read_text()
     state, existed = load_state(args.state, text)
+    validate_state_cidrs(state, tailnet)
     apply_command(state, args, fresh_file=not existed, policy_text=text)
+    validate_state_cidrs(state, tailnet)
     regions = render(state)
     new_text = text
     for name, body in regions.items():

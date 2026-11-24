@@ -98,10 +98,10 @@ PY
 
 cp "$root/headscale/policy.hujson" "$lab/policy.hujson"
 python3 "$root/policy.py" init \
-  --policy "$lab/policy.hujson" --state "$lab/managed.json" \
+  --policy "$lab/policy.hujson" --headscale-config "$lab/config.yaml" --state "$lab/managed.json" \
   --org acme --admin admin --tailnet-admin --lan-cidr "$LAN_CIDR" >/dev/null
 python3 "$root/policy.py" add-tenant \
-  --policy "$lab/policy.hujson" --state "$lab/managed.json" \
+  --policy "$lab/policy.hujson" --headscale-config "$lab/config.yaml" --state "$lab/managed.json" \
   --org globex >/dev/null
 
 # Placeholder enroll files so compose can create the container later.

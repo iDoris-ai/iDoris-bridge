@@ -29,7 +29,7 @@
 //   * A subnet router, when bootstrap was given --lan-cidr, is tag:<org>-gateway.
 //     autoApprovers.routes approves that prefix only for that tag. Members of
 //     the same organisation may open 8740, 8742, 443 and 11434 on the prefix.
-//     The same prefix cannot belong to two organisations.
+//     Overlapping prefixes cannot belong to different organisations.
 //
 // Markers
 //   bootstrap.sh rewrites the lines between each BEGIN/END pair. Edit rules

@@ -299,6 +299,13 @@ func (m *memHost) Stat(path string) (os.FileInfo, error) {
 	if target, ok := m.links[path]; ok {
 		return m.Stat(target)
 	}
+	return m.Lstat(path)
+}
+
+func (m *memHost) Lstat(path string) (os.FileInfo, error) {
+	if _, ok := m.links[path]; ok {
+		return memInfo{name: filepath.Base(path), mode: os.ModeSymlink}, nil
+	}
 	if _, ok := m.files[path]; !ok {
 		return nil, os.ErrNotExist
 	}

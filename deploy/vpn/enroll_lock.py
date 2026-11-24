@@ -8,7 +8,9 @@ policy reconciles cannot be overwritten by a stale snapshot.
 The lock is mode 0600. Root chowns it to the enrollment runtime uid (the
 image USER, normally 65532, or the operator uid recorded as ENROLL_UID)
 so that user can join the transaction. A rewrite uses a unique temp file
-in the same directory and keeps the existing owner and mode.
+in the same directory, fsyncs it before the rename, fsyncs the directory
+after the rename, and keeps the existing owner and mode. It does not
+rewrite <config>.bak.
 
 IDORIS_ENROLL_LOCK_HOLD_SECONDS and IDORIS_ENROLL_LOCK_SIGNAL widen the
 window for tests. They are unset in production. The hold is capped at
@@ -204,29 +206,61 @@ def _open_lock(lock_path: Path, runtime):
 
 
 def _replace(path: Path, data: bytes, mode: int, owner) -> None:
+    """Replace path with data, keeping its mode and owner.
+
+    fsync the temp file before os.replace, then fsync the parent directory.
+    A crash leaves the previous file or the new bytes. It does not leave the
+    published name pointing at data that never reached disk. An empty publish
+    is refused: Go treats a zero-length config as its own truncate window and
+    copies <path>.bak over it.
+
+    This does not refresh or remove .bak. After a completed Go revoke that
+    backup still contains the removed hash, until the next Go write. fsync
+    does not stop a later truncation of a finished file from making Go
+    publish that backup. A directory fsync error is raised after the rename:
+    path already holds the new bytes, and the directory entry may not be
+    durable yet.
+    """
+    if not data:
+        raise ValueError("refusing to replace enroll config with an empty file")
     directory = str(path.parent)
-    fd, tmp = tempfile.mkstemp(prefix=".enroll-", suffix=".tmp", dir=directory)
-    tmp_left = tmp
+    dir_flags = os.O_RDONLY
+    if hasattr(os, "O_DIRECTORY"):
+        dir_flags |= os.O_DIRECTORY
+    dirfd = os.open(directory, dir_flags)
     try:
-        view = memoryview(data)
-        while view:
-            written = os.write(fd, view)
-            view = view[written:]
-        os.fchmod(fd, mode)
-        if owner is not None and os.geteuid() == 0:
-            os.fchown(fd, owner[0], owner[1])
-        os.close(fd)
-        fd = -1
-        os.replace(tmp, path)
-        tmp_left = ""
-    finally:
-        if fd >= 0:
+        fd, tmp = tempfile.mkstemp(prefix=".enroll-", suffix=".tmp", dir=directory)
+        tmp_left = tmp
+        try:
+            view = memoryview(data)
+            while view:
+                written = os.write(fd, view)
+                view = view[written:]
+            os.fchmod(fd, mode)
+            if owner is not None and os.geteuid() == 0:
+                os.fchown(fd, owner[0], owner[1])
+            os.fsync(fd)
             os.close(fd)
-        if tmp_left:
+            fd = -1
+            os.replace(tmp, path)
+            tmp_left = ""
             try:
-                os.unlink(tmp_left)
-            except FileNotFoundError:
-                pass
+                os.fsync(dirfd)
+            except OSError as exc:
+                raise OSError(
+                    exc.errno,
+                    "enroll config %s was replaced but the parent directory fsync failed" % path,
+                ) from exc
+        finally:
+            if fd >= 0:
+                os.close(fd)
+            if tmp_left:
+                try:
+                    os.unlink(tmp_left)
+                except FileNotFoundError:
+                    pass
+    finally:
+        os.close(dirfd)
 
 
 def _hold_for_tests() -> None:

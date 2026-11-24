@@ -768,3 +768,199 @@ func TestENOSPCDoesNotUnlockRead(t *testing.T) {
 		}
 	}
 }
+
+// pythonPublish is one finished Python replace of a config Go has already revoked.
+type pythonPublish struct {
+	path      string
+	bakBefore []byte
+	livePerm  os.FileMode
+	h0        string
+	h1        string
+}
+
+// publishPythonReplacement revokes one hash, then runs the real Python
+// locked_update. The contract checked here is only the publish: a new inode,
+// the same lock inode, the revoked hash absent from the live file, and .bak
+// bytes, mode, and owner left untouched. It does not truncate the live file
+// and it does not treat a later restore of that .bak as success.
+func publishPythonReplacement(t *testing.T) pythonPublish {
+	t.Helper()
+	if _, err := exec.LookPath("python3"); err != nil {
+		t.Skip("python3 is required")
+	}
+	h0 := HashToken("seed-token")
+	h1 := HashToken("second-token")
+	path := writeHashes(t, 0o640, []string{h0, h1})
+	if _, err := Revoke(path, "acme", h0[:8]); err != nil {
+		t.Fatal(err)
+	}
+	bakBefore, err := os.ReadFile(path + ".bak")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(bakBefore, []byte(h0)) {
+		t.Fatal("completed revoke did not leave the hash in bak")
+	}
+	live, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(live, []byte(h0)) {
+		t.Fatal("completed revoke left the hash in the live file")
+	}
+	before := configInode(t, path)
+	lockBefore := configInode(t, path+".lock")
+	bakSt, err := os.Stat(path + ".bak")
+	if err != nil {
+		t.Fatal(err)
+	}
+	liveSt, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	dir := filepath.Dir(path)
+	script := filepath.Join(dir, "replace.py")
+	body := "import sys\n" +
+		"sys.path.insert(0, sys.argv[1])\n" +
+		"from enroll_lock import locked_update\n" +
+		"def mutate(cfg):\n" +
+		"    cfg['control_url'] = 'https://replaced.example'\n" +
+		"    return cfg\n" +
+		"locked_update(sys.argv[2], mutate)\n"
+	if err := os.WriteFile(script, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command("python3", script, enrollDeployDir(t), path)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("python replace: %v\n%s", err, out)
+	}
+
+	if configInode(t, path) == before {
+		t.Fatal("python replace kept Go's inode")
+	}
+	if configInode(t, path+".lock") != lockBefore {
+		t.Fatal("python replaced the lock file Go created")
+	}
+	replaced, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(replaced, []byte(h0)) || !bytes.Contains(replaced, []byte("https://replaced.example")) {
+		t.Fatalf("python publish = %s", replaced)
+	}
+	if _, err := LoadFile(path); err != nil {
+		t.Fatalf("Go cannot read the Python publish: %v\n%s", err, replaced)
+	}
+	bakAfter, err := os.ReadFile(path + ".bak")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(bakAfter, bakBefore) {
+		t.Fatal("python replace rewrote bak")
+	}
+	bakStAfter, err := os.Stat(path + ".bak")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bakStAfter.Mode().Perm() != bakSt.Mode().Perm() {
+		t.Fatalf("bak mode %o, was %o", bakStAfter.Mode().Perm(), bakSt.Mode().Perm())
+	}
+	bakUID, bakGID := fileOwner(t, path+".bak")
+	prevUID, prevGID := ownerOfInfo(t, bakSt)
+	if bakUID != prevUID || bakGID != prevGID {
+		t.Fatalf("bak owner %d:%d, was %d:%d", bakUID, bakGID, prevUID, prevGID)
+	}
+	liveAfter, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if liveAfter.Mode().Perm() != liveSt.Mode().Perm() {
+		t.Fatalf("live mode %o, was %o", liveAfter.Mode().Perm(), liveSt.Mode().Perm())
+	}
+	liveUID, liveGID := fileOwner(t, path)
+	prevLiveUID, prevLiveGID := ownerOfInfo(t, liveSt)
+	if liveUID != prevLiveUID || liveGID != prevLiveGID {
+		t.Fatalf("live owner %d:%d, was %d:%d", liveUID, liveGID, prevLiveUID, prevLiveGID)
+	}
+	return pythonPublish{
+		path:      path,
+		bakBefore: bakBefore,
+		livePerm:  liveSt.Mode().Perm(),
+		h0:        h0,
+		h1:        h1,
+	}
+}
+
+// TestPythonReplaceKeepsStaleBakWithoutPublishingRevokedHash is the contract
+// of the fsync-before-rename writer. Python publishes a new inode and leaves
+// the revoked hash out of that file. It does not refresh .bak.
+func TestPythonReplaceKeepsStaleBakWithoutPublishingRevokedHash(t *testing.T) {
+	publishPythonReplacement(t)
+}
+
+// TestOpenLimitLaterTruncateRestoresStaleBak records a hole this change does
+// not close. After the Python publish has finished, emptying the live file
+// still makes ReadFileLocked copy the old .bak, and that backup still holds
+// the revoked hash. A pass means the hash comes back. That is not the desired
+// recovery behavior, and fsync does not close it. A later recovery change
+// replaces this test in the same commit.
+func TestOpenLimitLaterTruncateRestoresStaleBak(t *testing.T) {
+	pub := publishPythonReplacement(t)
+	if err := os.WriteFile(pub.path, nil, pub.livePerm); err != nil {
+		t.Fatal(err)
+	}
+	pythonInode := configInode(t, pub.path)
+	got, err := ReadFileLocked(pub.path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, pub.bakBefore) || !bytes.Contains(got, []byte(pub.h0)) {
+		t.Fatal("open limit changed shape: an empty file no longer restored the stale bak. Record the new recovery in the commit that changes it")
+	}
+	disk, err := os.ReadFile(pub.path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(disk, pub.bakBefore) {
+		t.Fatal("open limit changed shape: restore did not write bak back to disk")
+	}
+	if configInode(t, pub.path) != pythonInode {
+		t.Fatal("restore replaced the inode Python published")
+	}
+	if !bytes.Contains(disk, []byte(pub.h1)) {
+		t.Fatal("restored backup lost the hash revoke kept")
+	}
+}
+
+func enrollDeployDir(t *testing.T) string {
+	t.Helper()
+	_, file, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("runtime.Caller failed")
+	}
+	dir := filepath.Clean(filepath.Join(filepath.Dir(file), "..", "..", "..", "deploy", "vpn"))
+	if _, err := os.Stat(filepath.Join(dir, "enroll_lock.py")); err != nil {
+		t.Fatal(err)
+	}
+	return dir
+}
+
+func fileOwner(t *testing.T, path string) (int, int) {
+	t.Helper()
+	st, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return ownerOfInfo(t, st)
+}
+
+func ownerOfInfo(t *testing.T, st os.FileInfo) (int, int) {
+	t.Helper()
+	sys, ok := st.Sys().(*syscall.Stat_t)
+	if !ok || sys == nil {
+		t.Fatal("no stat")
+	}
+	return int(sys.Uid), int(sys.Gid)
+}

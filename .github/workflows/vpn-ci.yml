@@ -4,6 +4,7 @@ on:
     branches: [main]
     paths: ["vpn/**", ".github/workflows/vpn-ci.yml"]
   pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
     paths: ["vpn/**", ".github/workflows/vpn-ci.yml"]
 
 permissions:

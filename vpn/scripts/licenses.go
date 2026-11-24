@@ -852,6 +852,10 @@ func httpURL(raw string) string {
 		return ""
 	}
 	if strings.HasPrefix(raw, "https://") || strings.HasPrefix(raw, "http://") {
+		const legacyGVisorRepo = "https://github.com/google/gvisor"
+		if raw == legacyGVisorRepo || strings.HasPrefix(raw, legacyGVisorRepo+"/") {
+			return "https://github.com/gvisor/gvisor" + strings.TrimPrefix(raw, legacyGVisorRepo)
+		}
 		return raw
 	}
 	return ""

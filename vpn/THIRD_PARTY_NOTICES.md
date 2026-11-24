@@ -74,7 +74,7 @@ Modules: 42
 | `golang.org/x/time` | `v0.16.0` | BSD-3-Clause | https://cs.opensource.google/go/x/time/+/v0.16.0:LICENSE | darwin, linux, windows |
 | `golang.zx2c4.com/wintun` | `v0.0.0-20230126152724-0fa3db229ce2` | MIT | https://git.zx2c4.com/wintun-go/tree/LICENSE?id=0fa3db229ce2 | windows |
 | `golang.zx2c4.com/wireguard/windows` | `v1.0.1` | MIT | https://git.zx2c4.com/wireguard-windows/tree/COPYING?h=v1.0.1 | windows |
-| `gvisor.dev/gvisor` | `v0.0.0-20260915211658-a6f909f08a72` | Apache-2.0 | https://github.com/google/gvisor/blob/a6f909f08a72/LICENSE | darwin, linux, windows |
+| `gvisor.dev/gvisor` | `v0.0.0-20260915211658-a6f909f08a72` | Apache-2.0 | https://github.com/gvisor/gvisor/blob/a6f909f08a72/LICENSE | darwin, linux, windows |
 | `tailscale.com` | `v1.104.2` | BSD-3-Clause | https://github.com/tailscale/tailscale/blob/v1.104.2/LICENSE | darwin, linux, windows |
 
 ## License texts
@@ -2549,7 +2549,7 @@ DEALINGS IN THE SOFTWARE.
 ### `gvisor.dev/gvisor` `v0.0.0-20260915211658-a6f909f08a72`
 
 - License: Apache-2.0
-- Source: https://github.com/google/gvisor/blob/a6f909f08a72/LICENSE
+- Source: https://github.com/gvisor/gvisor/blob/a6f909f08a72/LICENSE
 
 ```
 

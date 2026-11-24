@@ -4,6 +4,7 @@ on:
     branches: [main]
     paths: ["vpn/**", ".github/workflows/vpn-ci.yml"]
   pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
     paths: ["vpn/**", ".github/workflows/vpn-ci.yml"]
 
 permissions:
@@ -29,7 +30,9 @@ jobs:
       - run: make build && make build-linux
 
   integration:
-    runs-on: ubuntu-latest
+    # The LAN suite passed on 24.04. On 26.04 the containers'
+    # iptables-legacy could not initialize the filter table.
+    runs-on: ubuntu-24.04
     needs: unit
     defaults:
       run:

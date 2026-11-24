@@ -20,6 +20,8 @@
 | [12-VPN-HEADSCALE.md](12-VPN-HEADSCALE.md) | 私有接入层（VPN） | 官方 Tailscale 客户端 + 自建 Headscale + idoris-vpnd 守护进程；调研、方案、WBS、测试门禁 |
 | [../vendors/README.md](../vendors/README.md) | 上游 clone 复现 | 本地 vendors/ 克隆、固定 SHA、非产品依赖 |
 | [archive/2026-10-21-G0-G5-baseline.md](archive/2026-10-21-G0-G5-baseline.md) | 旧版计划归档 | 保留原 G0–G5 的所有要求，当前以三阶段规划为准 |
+| [archive/README.md](archive/README.md) | 历史文档追溯 | v0.1 原文逐字节归档、原章节到当前维护文档的映射 |
+| [archive/IDORIS-SNS-BRIDGE-ARCHITECTURE-v0.1.md](archive/IDORIS-SNS-BRIDGE-ARCHITECTURE-v0.1.md) | 原始综合架构 v0.1 | 2026-10-21 原始技术方案与历史 G0–G5，留作原始记录 |
 | [adr/0001-local-first-agent-boundary.md](adr/0001-local-first-agent-boundary.md) | ADR 001 | 只提供通信桥，不重建 Agent |
 | [adr/0002-account-ownership-and-credentials.md](adr/0002-account-ownership-and-credentials.md) | ADR 002 | 客户持有账号，最小凭据委托 |
 | [adr/0003-delivery-and-cost-semantics.md](adr/0003-delivery-and-cost-semantics.md) | ADR 003 | 至少一次传输，业务幂等、付费发送显式授权 |
